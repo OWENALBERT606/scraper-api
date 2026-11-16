@@ -3,3 +3,8 @@ dist/
 .env
 .env.*
 *.log
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+.vscode/

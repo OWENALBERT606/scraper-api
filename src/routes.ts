@@ -1,41 +1,26 @@
 import { Router, Request, Response } from "express";
 import { scrape, ScrapeOptions, ScrapeResult } from "./scraper";
 import {
-  fetchMoviesWithDetails,
+  fetchDashboard,
+  fetchDashboardWithDetails,
+  fetchFullCatalog,
   fetchMovieDetail,
   fetchSeries,
-  fetchSeriesDetail,
-  fetchAllSeries,
-  fetchGenres,
-  type Movie,
-} from "./scrapers/tulabe";
+  searchContent,
+  clearFreeWatchCache,
+} from "./scrapers/freewatch";
 import { proxyBase, proxyUrl } from "./proxy";
-
-// Stamp every movie with proxy-resolved URLs safe for any consuming origin
-function enrichMovie(movie: Movie, base: string): Movie & {
-  poster_url: string;
-  stream_url: string;
-  qualities: Array<Movie["qualities"][number] & { stream_url: string }>;
-} {
-  const best = movie.qualities?.length
-    ? movie.qualities[movie.qualities.length - 1]
-    : null;
-
-  return {
-    ...movie,
-    poster_url: proxyUrl(base, movie.thumbnail_url),   // image through proxy
-    stream_url: best ? proxyUrl(base, best.playlist_url) : "",  // best quality HLS
-    qualities: (movie.qualities ?? []).map((q) => ({
-      ...q,
-      stream_url: proxyUrl(base, q.playlist_url),
-    })),
-  };
-}
 
 const router = Router();
 
 // In-memory cache: url → result
 const cache = new Map<string, ScrapeResult>();
+
+// Video CDN URLs must be fetched directly by the browser (geo-restricted Bunny CDN).
+// We return the raw URL as stream_url and let the browser handle it with referrerpolicy.
+function rawStreamUrl(playingurl: string): string {
+  return playingurl || "";
+}
 
 // ── POST /scrape ──────────────────────────────────────────────────────────────
 router.post("/scrape", async (req: Request, res: Response) => {
@@ -83,25 +68,37 @@ router.delete("/cache", (req: Request, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tulabe routes
+// FreeWatch UG routes  (https://www.freewatchug.online)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── GET /tulabe/movies ────────────────────────────────────────────────────────
-// Query params: page, limit, genre_id, latest
-router.get("/tulabe/movies", async (req: Request, res: Response) => {
+// ── GET /freewatch/dashboard ──────────────────────────────────────────────────
+// Returns homepage sections + movie list with full titles/meta.
+// First call fetches all details (~134 items in batches); subsequent calls use cache.
+router.get("/freewatch/dashboard", async (req: Request, res: Response) => {
   try {
-    const page     = parseInt(req.query.page    as string) || 1;
-    const limit    = parseInt(req.query.limit   as string) || 20;
-    const genre_id = req.query.genre_id ? parseInt(req.query.genre_id as string) : undefined;
-    const latest   = req.query.latest === "true";
-    const base     = proxyBase(req);
+    const base = proxyBase(req);
+    const data = await fetchDashboardWithDetails();
 
-    const { movies, pagination } = await fetchMoviesWithDetails({ page, limit, genre_id, latest });
+    const enrichMovies = (movies: typeof data.movies) =>
+      movies.map((m) => ({
+        ...m,
+        poster_url: proxyUrl(base, m.image),
+        stream_url: rawStreamUrl(m.playingurl),
+      }));
+
     res.json({
       success: true,
       data: {
-        movies: movies.map((m) => enrichMovie(m, base)),
-        pagination,
+        sections: data.sections,
+        unique_movies: data.unique_movies,
+        movies: enrichMovies(data.movies),
+        banner: data.banner
+          ? {
+              ...data.banner,
+              poster_url: proxyUrl(base, data.banner.image),
+              stream_url: rawStreamUrl(data.banner.playingurl),
+            }
+          : undefined,
       },
     });
   } catch (err) {
@@ -109,67 +106,109 @@ router.get("/tulabe/movies", async (req: Request, res: Response) => {
   }
 });
 
-// ── GET /tulabe/movies/:id ────────────────────────────────────────────────────
-router.get("/tulabe/movies/:id", async (req: Request, res: Response) => {
+// ── GET /freewatch/catalog ────────────────────────────────────────────────────
+// Full catalog built by searching a-z. ~465 unique titles. Cached 1 hour.
+router.get("/freewatch/catalog", async (req: Request, res: Response) => {
   try {
-    const movie = await fetchMovieDetail(req.params.id);
-    res.json({ success: true, data: enrichMovie(movie, proxyBase(req)) });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "Not found" });
-  }
-});
-
-// ── GET /tulabe/series ────────────────────────────────────────────────────────
-router.get("/tulabe/series", async (req: Request, res: Response) => {
-  try {
-    const page  = parseInt(req.query.page  as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 20;
-    const data  = await fetchSeries({ page, limit });
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
-  }
-});
-
-// ── GET /tulabe/series/all (must be before /:id) ──────────────────────────────
-router.get("/tulabe/series/all", async (_req: Request, res: Response) => {
-  try {
-    const series = await fetchAllSeries();
-    res.json({ success: true, data: { series, total: series.length } });
-  } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
-  }
-});
-
-// ── GET /tulabe/series/:id ────────────────────────────────────────────────────
-router.get("/tulabe/series/:id", async (req: Request, res: Response) => {
-  try {
-    const base   = proxyBase(req);
-    const detail = await fetchSeriesDetail(parseInt(req.params.id));
-    const enriched = {
-      ...detail,
-      seasons: detail.seasons.map((season) => ({
-        ...season,
-        episodes: season.episodes.map((ep) => ({
-          ...ep,
-          poster_url: proxyUrl(base, ep.thumbnail_url),
-          stream_url: ep.video_url ? proxyUrl(base, ep.video_url) : "",
+    const base = proxyBase(req);
+    const items = await fetchFullCatalog();
+    res.json({
+      success: true,
+      data: {
+        total: items.length,
+        movies: items.map((m) => ({
+          ...m,
+          poster_url: proxyUrl(base, m.image),
+          stream_url: rawStreamUrl(m.playingurl),
         })),
-      })),
-    };
-    res.json({ success: true, data: enriched });
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
+  }
+});
+
+
+// Full movie detail including direct MP4 / HLS stream URL.
+router.get("/freewatch/movies/:id", async (req: Request, res: Response) => {
+  try {
+    const base = proxyBase(req);
+    const movie = await fetchMovieDetail(req.params.id);
+    res.json({
+      success: true,
+      data: {
+        ...movie,
+        poster_url: proxyUrl(base, movie.image),
+        stream_url: rawStreamUrl(movie.playingurl),
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Not found" });
   }
 });
 
-// ── GET /tulabe/genres ────────────────────────────────────────────────────────
-router.get("/tulabe/genres", async (_req: Request, res: Response) => {
+// ── GET /freewatch/series/:seriesCode ─────────────────────────────────────────
+// All episodes for a series (use series_code from dashboard or search).
+router.get("/freewatch/series/:seriesCode", async (req: Request, res: Response) => {
   try {
-    res.json({ success: true, data: await fetchGenres() });
+    const base = proxyBase(req);
+    const data = await fetchSeries(req.params.seriesCode);
+    res.json({
+      success: true,
+      data: {
+        ...data,
+        episodes: data.episodes.map((ep) => ({
+          ...ep,
+          poster_url: proxyUrl(base, ep.image),
+          stream_url: rawStreamUrl(ep.playingurl),
+        })),
+      },
+    });
   } catch (err) {
-    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
+    res.status(500).json({ error: err instanceof Error ? err.message : "Not found" });
   }
+});
+
+// ── GET /freewatch/search?q=... ───────────────────────────────────────────────
+// Search movies and series by title.
+router.get("/freewatch/search", async (req: Request, res: Response) => {
+  const q = req.query.q as string;
+  if (!q) {
+    res.status(400).json({ error: "q query param is required" });
+    return;
+  }
+  try {
+    const base = proxyBase(req);
+    const data = await searchContent(q);
+    res.json({
+      success: true,
+      data: {
+        query: data.query,
+        total: data.total,
+        movies: data.movies.map((m) => ({
+          ...m,
+          poster_url: proxyUrl(base, m.image),
+          stream_url: rawStreamUrl(m.playingurl),
+        })),
+        series: data.series.map((s) => ({
+          ...s,
+          episodes: s.episodes.map((ep) => ({
+            ...ep,
+            poster_url: proxyUrl(base, ep.image),
+            stream_url: rawStreamUrl(ep.playingurl),
+          })),
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Search failed" });
+  }
+});
+
+// ── DELETE /freewatch/cache ───────────────────────────────────────────────────
+router.delete("/freewatch/cache", (_req: Request, res: Response) => {
+  clearFreeWatchCache();
+  res.json({ success: true, message: "FreeWatch cache cleared" });
 });
 
 export default router;
