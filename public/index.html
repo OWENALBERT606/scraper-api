@@ -582,9 +582,10 @@
       const m = json.data;
 
       let episodesHTML = '';
-      if (m.series_code) {
+      if (m.is_series || m.series_code) {
         try {
-          const sr = await fetch(`${API}/series/${m.series_code}`);
+          // the episodes are found from this entry's id (FreeWatch files every episode as its own entry)
+          const sr = await fetch(`${API}/series/${m.id}`);
           const sj = await sr.json();
           const eps = sj.data?.episodes || [];
           if (eps.length > 0) {
@@ -596,7 +597,7 @@
                 <div class="episode-row" onclick="playEpisode('${epStream}', '${escape(ep.title || 'Episode ' + (i+1))}')">
                   <div class="ep-num">${i + 1}</div>
                   <div class="ep-title">${ep.title || 'Episode ' + (i+1)}</div>
-                  <div class="ep-meta">${ep.size || ''}</div>
+                  <div class="ep-meta">${ep.vj ? ep.vj.trim() + ' · ' : ''}${ep.size || ''}</div>
                   ${epStream ? `<a class="ep-dl" href="${epStream}" download="${epFile}" onclick="event.stopPropagation()" title="Download">⬇</a><button class="ep-dl" onclick="event.stopPropagation(); queueUpload({ id: ${ep.id} })" title="Download & Upload">⬆</button>` : ''}
                   <div class="ep-play">▶</div>
                 </div>`;

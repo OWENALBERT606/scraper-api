@@ -208,31 +208,66 @@ export async function fetchMovieDetail(id: number | string): Promise<FWMovieDeta
   return get<FWMovieDetail>(`/movie/${id}`);
 }
 
-/** Series episodes by series_code — searches by title to find all related episodes */
-export async function fetchSeries(seriesCode: number | string): Promise<FWSeries> {
-  // First get the base movie to know the title
-  const base = await fetchMovieDetail(seriesCode);
-  if (!base.title) return { series_code: String(seriesCode), base_name: "", count: 0, episodes: [] };
-
-  // Extract clean title (strip episode/season suffixes)
-  const cleanTitle = base.title
-    .replace(/\s*(Season|Episode|Eps?|S\d+E\d+)[^]*/i, "")
-    .replace(/:\s*$/, "")
+/** "Your Honor Season 2: Episode 1" -> "Your Honor" (the title without its season / episode part) */
+function seriesBase(title: string): string {
+  return title
+    .replace(/[\s:\u2013\u2014-]*\b(season|series|episode|eps?\.?)\s*\d+[^]*$/i, "")
+    .replace(/[\s:\u2013\u2014-]*\bs\d{1,2}\s*e\d{1,3}\b[^]*$/i, "")
+    .replace(/[\s:\u2013\u2014-]+$/, "")
     .trim();
+}
 
-  // Search for all episodes with this title
-  const result = await get<FWSearchResult>(`/search?q=${encodeURIComponent(cleanTitle)}`);
+const baseKey = (t: string) => seriesBase(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-  // Collect all episodes across matching series entries
+/** [season, episode] read from a title; unknown parts are 0 */
+function seasonEpisode(title: string): [number, number] {
+  const se = /\bs(\d{1,2})\s*e(\d{1,3})\b/i.exec(title);
+  if (se) return [Number(se[1]), Number(se[2])];
+  const season = /\b(?:season|series)\s*(\d+)/i.exec(title);
+  const ep = /\b(?:episode|eps?\.?)\s*(\d+)/i.exec(title);
+  return [season ? Number(season[1]) : 0, ep ? Number(ep[1]) : 0];
+}
+
+/**
+ * Every episode FreeWatch has for a series. FreeWatch files each episode as its own entry, so the episodes are found by
+ * searching the series' base title and keeping the entries that share it, ordered by season and episode. `id` is the id
+ * of any one episode (the one that was opened); it is always part of the answer.
+ */
+export async function fetchSeries(id: number | string): Promise<FWSeries> {
+  const base = await fetchMovieDetail(id);
+  if (!base.title) return { series_code: String(id), base_name: "", count: 0, episodes: [] };
+
+  const name = seriesBase(base.title) || base.title;
+  const key = baseKey(base.title);
+  const result = await get<FWSearchResult>(`/search?q=${encodeURIComponent(name)}`);
+
   const seen = new Map<number, FWEpisode>();
+  const self: FWEpisode = {
+    id: Number(base.id),
+    title: base.title,
+    series_code: String(base.series_code ?? ""),
+    type: base.type,
+    category_id: base.category_id,
+    image: base.image,
+    size: base.size,
+    vj: base.vj,
+    playingurl: base.playingurl,
+  };
+  seen.set(self.id, self);
+
   for (const s of result.series ?? []) {
     for (const ep of s.episodes ?? []) {
-      if (!seen.has(ep.id)) seen.set(ep.id, ep);
+      const title = ep.title || s.title;
+      if (baseKey(title) === key && !seen.has(ep.id)) seen.set(ep.id, { ...ep, title });
     }
   }
 
-  const episodes = Array.from(seen.values()).sort((a, b) => a.id - b.id);
-  return { series_code: String(seriesCode), base_name: cleanTitle, count: episodes.length, episodes };
+  const episodes = Array.from(seen.values()).sort((a, b) => {
+    const [as, ae] = seasonEpisode(a.title);
+    const [bs, be] = seasonEpisode(b.title);
+    return as - bs || ae - be || a.id - b.id;
+  });
+  return { series_code: String(base.series_code ?? id), base_name: name, count: episodes.length, episodes };
 }
 
 /**
