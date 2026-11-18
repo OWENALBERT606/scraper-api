@@ -16,17 +16,20 @@ export interface Copied {
 
 /** Streams a video straight from its source into Backblaze B2: nothing is kept in memory or written to disk. */
 export class B2Store {
-  private client: S3Client;
+  private _client: S3Client | null = null;
 
-  constructor(private cfg: ImportConfig) {
-    this.client = new S3Client({
-      region: cfg.b2.region,
-      endpoint: cfg.b2.endpoint,
-      credentials: { accessKeyId: cfg.b2.keyId, secretAccessKey: cfg.b2.appKey },
+  constructor(private cfg: ImportConfig) {}
+
+  /** Built on first use, so a server with no B2 settings (link mode, or still being set up) starts without it. */
+  private get client(): S3Client {
+    return (this._client ??= new S3Client({
+      region: this.cfg.b2.region,
+      endpoint: this.cfg.b2.endpoint,
+      credentials: { accessKeyId: this.cfg.b2.keyId, secretAccessKey: this.cfg.b2.appKey },
       // B2's S3 API does not take the extra checksum headers newer SDK versions add by default
       requestChecksumCalculation: "WHEN_REQUIRED",
       responseChecksumValidation: "WHEN_REQUIRED",
-    });
+    }));
   }
 
   /**

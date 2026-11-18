@@ -75,6 +75,11 @@ test("config reports what is missing and never throws", () => {
   assert.equal(config.platformUrl, "http://x.test/api/v1");
   assert.equal(config.concurrency, 4);
   assert.equal(b2ObjectUrl(config.b2, "movies/a.mp4"), "https://bkt.s3.example.com/movies/a.mp4");
+  assert.equal(b2ObjectUrl({ ...config.b2, publicUrl: "https://cdn.example.com/" .replace(/\/$/, "") }, "movies/a.mp4"), "https://cdn.example.com/movies/a.mp4");
+  // the API's own variable names work too
+  const api = loadImportConfig({ IMPORT_MODE: "copy", B2_APP_KEY: "s", B2_BUCKET_NAME: "bkt2" });
+  assert.equal(api.config.b2.appKey, "s");
+  assert.equal(api.config.b2.bucket, "bkt2");
 });
 
 function fakePlatform(routes: (method: string, path: string) => { status?: number; body: unknown }) {
@@ -110,4 +115,10 @@ test("platform: finds an existing VJ by loose name and creates a missing one", a
   assert.equal((await platform.ensureVj("Vj Emmy")).id, "1");
   assert.equal((await platform.ensureVj("Vj New")).id, "9");
   assert.equal(calls.filter((c) => c === "POST /vjs").length, 1);
+});
+
+test("platform: a refused sign-in is fatal and names the likely cause on a 404", async () => {
+  const { config } = loadImportConfig({ PLATFORM_API_URL: "http://x.test/api/v1", PLATFORM_EMAIL: "a@b.c", PLATFORM_PASSWORD: "pw" });
+  const p = new Platform(config, (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch);
+  await assert.rejects(p.signIn(), (e: Error & { fatal?: boolean }) => e.fatal === true && /PLATFORM_API_URL/.test(e.message));
 });

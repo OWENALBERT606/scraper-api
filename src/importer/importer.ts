@@ -216,6 +216,7 @@ export class Importer {
     this.items.clear();
     this.message = "Looking at what the source has…";
     try {
+      await this.platform.signIn(); // a wrong address or password stops the run here, before any film is touched
       const ledger = await this.readLedger();
       const found = opts.ids?.length ? { ids: opts.ids, groupSize: new Map<number, number>() } : await this.discover();
       const fresh = found.ids.filter((id) => !ledger.imported[String(id)] && (ledger.failed[String(id)]?.attempts ?? 0) < MAX_ATTEMPTS);
@@ -237,7 +238,7 @@ export class Importer {
         }
       };
       await Promise.all(Array.from({ length: this.dryRun ? 4 : this.cfg.concurrency }, worker));
-      this.message = this.stopRequested ? "Stopped" : "Finished";
+      if (!this.message.startsWith("The import stopped")) this.message = this.stopRequested ? "Stopped" : "Finished";
     } catch (e) {
       this.message = `The import stopped: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
@@ -370,12 +371,17 @@ export class Importer {
       this.touch(item, { status: "imported", movieId: created.id, title: officialTitle, reason: meta ? "Imported with TMDB metadata" : "Imported with the source's metadata" });
     } catch (e) {
       if (uploadedKey) await this.store.remove(uploadedKey).catch(() => undefined); // never leave an orphaned file in the bucket
+      if (e instanceof PlatformError && e.fatal) {
+        this.stopRequested = true;
+        this.message = `The import stopped: ${e.message}`;
+      }
       if (e instanceof PlatformError && e.status === 409) return skip("Already on the platform (created while this ran)");
       await this.fail(item, ledger, sourceId, e instanceof Error ? e.message : String(e));
     }
   }
 
   private async fail(item: ImportItem, ledger: Ledger, sourceId: number, reason: string): Promise<void> {
+    if (this.dryRun) return void this.touch(item, { status: "failed", reason }); // a dry run leaves no trace in the ledger
     const attempts = (ledger.failed[String(sourceId)]?.attempts ?? 0) + 1;
     ledger.failed[String(sourceId)] = { attempts, reason, at: new Date().toISOString() };
     await this.writeLedger(ledger).catch(() => undefined);

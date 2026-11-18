@@ -3,6 +3,8 @@ import { cleanVj, normalizeTitle } from "./parse";
 
 /** An answer from the MovieChamp256 API that was not a success. */
 export class PlatformError extends Error {
+  /** true when no film can succeed until it is fixed (for example the sign-in is refused), so the run should stop */
+  fatal = false;
   constructor(public status: number, message: string) {
     super(message);
     this.name = "PlatformError";
@@ -36,6 +38,11 @@ export class Platform {
 
   constructor(private cfg: ImportConfig, private fetchImpl: typeof fetch = fetch) {}
 
+  /** Signs in now, so a wrong address or password is found before any film is looked at. */
+  async signIn(): Promise<void> {
+    await this.login();
+  }
+
   private async login(): Promise<void> {
     const res = await this.fetchImpl(`${this.cfg.platformUrl}/login`, {
       method: "POST",
@@ -45,7 +52,10 @@ export class Platform {
     });
     const json = (await res.json().catch(() => ({}))) as { data?: { accessToken?: string }; error?: string };
     if (!res.ok || !json.data?.accessToken) {
-      throw new PlatformError(res.status, json.error || "Could not sign in to the platform with PLATFORM_EMAIL / PLATFORM_PASSWORD");
+      const hint = res.status === 404 ? " (HTTP 404: check PLATFORM_API_URL, the API only answers on http:// and the address must end in /api/v1)" : "";
+      const err = new PlatformError(res.status, `${json.error || "Could not sign in to the platform with PLATFORM_EMAIL / PLATFORM_PASSWORD"}${hint}`);
+      err.fatal = true;
+      throw err;
     }
     this.token = json.data.accessToken;
   }

@@ -4,10 +4,10 @@
   "description": "Web scraping API for JS-rendered sites (React, Vue, TypeScript)",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "nodemon --exec ts-node src/index.ts",
+    "dev": "nodemon --ignore data --ignore downloads --exec \"node --env-file-if-exists=.env -r ts-node/register src/index.ts\"",
     "build": "tsc",
     "start": "node dist/index.js",
-    "import": "ts-node src/importer/cli.ts",
+    "import": "node --env-file-if-exists=.env -r ts-node/register src/importer/cli.ts",
     "test": "node --require ts-node/register --test src/importer/*.test.ts"
   },
   "dependencies": {

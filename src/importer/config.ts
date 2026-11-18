@@ -4,7 +4,7 @@ export interface ImportConfig {
   platformUrl: string; // e.g. http://api.moviechamp256.com/api/v1
   email: string;
   password: string;
-  b2: { endpoint: string; region: string; keyId: string; appKey: string; bucket: string };
+  b2: { endpoint: string; region: string; keyId: string; appKey: string; bucket: string; publicUrl: string };
   /** how many films are copied at once (each one streams a whole file, so keep this small) */
   concurrency: number;
   /** true: skip a film when its title already exists under ANY VJ; false (default): only under the same VJ */
@@ -48,8 +48,10 @@ export function loadImportConfig(env: NodeJS.ProcessEnv = process.env): { config
       endpoint: clean(env.B2_ENDPOINT).replace(/\/+$/, ""),
       region: clean(env.B2_REGION),
       keyId: clean(env.B2_KEY_ID),
-      appKey: clean(env.B2_APPLICATION_KEY),
-      bucket: clean(env.B2_BUCKET),
+      // the same names the MovieChamp256 API uses are accepted, so its B2 settings can be pasted as they are
+      appKey: clean(env.B2_APPLICATION_KEY) || clean(env.B2_APP_KEY),
+      bucket: clean(env.B2_BUCKET) || clean(env.B2_BUCKET_NAME),
+      publicUrl: clean(env.B2_PUBLIC_URL).replace(/\/+$/, ""),
     },
     concurrency: Math.max(1, Math.min(4, num(env, "IMPORT_CONCURRENCY", 1))),
     skipAnyVj: flag(env, "IMPORT_SKIP_ANY_VJ", false),
@@ -78,6 +80,8 @@ export function loadImportConfig(env: NodeJS.ProcessEnv = process.env): { config
 
 /** The public address of a stored object, in the same form the platform already uses: https://<bucket>.<s3 host>/<key> */
 export function b2ObjectUrl(b2: ImportConfig["b2"], key: string): string {
+  // the platform recognises its own videos by the B2_PUBLIC_URL prefix, so use it when it is set
+  if (b2.publicUrl) return `${b2.publicUrl}/${key}`;
   const host = new URL(b2.endpoint).host;
   return `https://${b2.bucket}.${host}/${key}`;
 }
