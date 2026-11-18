@@ -4,10 +4,18 @@ import { Readable, Transform } from "stream";
 import type { ReadableStream as NodeReadableStream } from "stream/web";
 import type { ImportConfig } from "./config";
 
-const BROWSER_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-  Referer: "https://www.freewatchug.online/",
-};
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36";
+
+/**
+ * FreeWatch's video CDN (Bunny) answers 403 to a request that carries the FreeWatch Referer, yet serves the same file to one
+ * without it; a few hosts want the Referer. So ask without it first and with it only if that is refused.
+ */
+async function openSource(url: string, signal?: AbortSignal): Promise<Response> {
+  const plain = await fetch(url, { headers: { "User-Agent": USER_AGENT }, signal });
+  if (plain.ok || (plain.status !== 403 && plain.status !== 401)) return plain;
+  await plain.body?.cancel().catch(() => undefined);
+  return fetch(url, { headers: { "User-Agent": USER_AGENT, Referer: "https://www.freewatchug.online/" }, signal });
+}
 
 export interface Copied {
   key: string;
@@ -37,7 +45,7 @@ export class B2Store {
    * the size announced by the source and against what B2 reports afterwards; on any failure the partial object is removed.
    */
   async copy(sourceUrl: string, key: string, onProgress: (bytes: number, total: number) => void, signal?: AbortSignal): Promise<Copied> {
-    const res = await fetch(sourceUrl, { headers: BROWSER_HEADERS, signal });
+    const res = await openSource(sourceUrl, signal);
     if (!res.ok || !res.body) throw new Error(`The source answered HTTP ${res.status}`);
     const type = (res.headers.get("content-type") || "").toLowerCase();
     if (type.startsWith("text/") || type.includes("json")) throw new Error(`The source returned ${type}, not a video`);

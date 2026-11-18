@@ -42,6 +42,8 @@ export interface RunOptions {
   limit?: number;
   /** only these FreeWatch ids */
   ids?: number[];
+  /** forget earlier failures so those films are tried again (films already imported are still skipped) */
+  retryFailed?: boolean;
 }
 
 export interface ImportStatus {
@@ -218,6 +220,10 @@ export class Importer {
     try {
       await this.platform.signIn(); // a wrong address or password stops the run here, before any film is touched
       const ledger = await this.readLedger();
+      if (opts.retryFailed && !this.dryRun) {
+        ledger.failed = {};
+        await this.writeLedger(ledger);
+      }
       const found = opts.ids?.length ? { ids: opts.ids, groupSize: new Map<number, number>() } : await this.discover();
       const fresh = found.ids.filter((id) => !ledger.imported[String(id)] && (ledger.failed[String(id)]?.attempts ?? 0) < MAX_ATTEMPTS);
       this.message = `${found.ids.length} titles found, ${found.ids.length - fresh.length} already handled earlier. Checking the rest…`;

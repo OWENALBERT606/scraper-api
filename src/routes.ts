@@ -296,9 +296,10 @@ router.get("/import/status", (_req: Request, res: Response) => {
 // ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: number[] } ──
 // Starts in the background and answers at once. Use dryRun first: it only reports what would be imported or skipped.
 router.post("/import/start", (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: number[] };
+  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: number[]; retryFailed?: boolean };
   const r = importer.start({
     dryRun: body.dryRun === true,
+    retryFailed: body.retryFailed === true,
     limit: typeof body.limit === "number" ? body.limit : undefined,
     ids: Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined,
   });
