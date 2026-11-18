@@ -10,6 +10,16 @@ import {
   clearFreeWatchCache,
 } from "./scrapers/freewatch";
 import { proxyBase, proxyUrl } from "./proxy";
+import { importer } from "./importer";
+import {
+  drainUploadQueue,
+  enqueueUploads,
+  getUploaderStatus,
+  isUploadConfigured,
+  startUploadScheduler,
+  stopUploadScheduler,
+  UploadRequest,
+} from "./uploader";
 
 const router = Router();
 
@@ -209,6 +219,97 @@ router.get("/freewatch/search", async (req: Request, res: Response) => {
 router.delete("/freewatch/cache", (_req: Request, res: Response) => {
   clearFreeWatchCache();
   res.json({ success: true, message: "FreeWatch cache cleared" });
+});
+
+router.post("/upload/queue", async (req: Request, res: Response) => {
+  if (!isUploadConfigured()) {
+    res.status(503).json({ error: "UPLOAD_API_URL is not configured on the server" });
+    return;
+  }
+
+  const body = req.body as { items?: UploadRequest[] } & UploadRequest;
+  const requests: UploadRequest[] = Array.isArray(body?.items) ? body.items : [body];
+
+  if (requests.length === 0) {
+    res.status(400).json({ error: "No items provided" });
+    return;
+  }
+
+  try {
+    const jobs = await enqueueUploads(requests);
+    res.json({
+      success: true,
+      queued: jobs.length,
+      jobs: jobs.map((job) => ({ id: job.id, filename: job.filename, title: job.metadata.title })),
+    });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Queue failed" });
+  }
+});
+
+router.post("/upload/start", async (_req: Request, res: Response) => {
+  if (!isUploadConfigured()) {
+    res.status(503).json({ error: "UPLOAD_API_URL is not configured on the server" });
+    return;
+  }
+  const handled = await drainUploadQueue();
+  res.json({ success: true, handled, status: getUploaderStatus() });
+});
+
+router.get("/upload/status", (_req: Request, res: Response) => {
+  res.json({ success: true, data: getUploaderStatus() });
+});
+
+router.post("/upload/start-scheduler", (_req: Request, res: Response) => {
+  startUploadScheduler();
+  res.json({ success: true, data: getUploaderStatus() });
+});
+
+router.post("/upload/stop-scheduler", (_req: Request, res: Response) => {
+  stopUploadScheduler();
+  res.json({ success: true, data: getUploaderStatus() });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Importer: copies films from FreeWatch UG to MovieChamp256 (video to Backblaze B2, full metadata, existing films skipped)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Anyone who can reach this server could otherwise start imports: require IMPORT_API_KEY (header x-api-key) when it is set.
+// With no key set, the import routes are refused unless the request comes from the machine itself.
+router.use("/import", (req: Request, res: Response, next) => {
+  const key = (process.env.IMPORT_API_KEY ?? "").trim();
+  if (key) {
+    if (req.header("x-api-key") === key) return next();
+    res.status(401).json({ error: "Missing or wrong x-api-key" });
+    return;
+  }
+  const ip = req.socket.remoteAddress ?? "";
+  if (["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(ip)) return next();
+  res.status(403).json({ error: "Set IMPORT_API_KEY on the server to use the import routes remotely" });
+});
+
+// ── GET /import/status ────────────────────────────────────────────────────────
+router.get("/import/status", (_req: Request, res: Response) => {
+  res.json({ success: true, data: importer.status() });
+});
+
+// ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: number[] } ──
+// Starts in the background and answers at once. Use dryRun first: it only reports what would be imported or skipped.
+router.post("/import/start", (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: number[] };
+  const r = importer.start({
+    dryRun: body.dryRun === true,
+    limit: typeof body.limit === "number" ? body.limit : undefined,
+    ids: Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined,
+  });
+  if (!r.started) { res.status(409).json({ error: r.reason }); return; }
+  res.json({ success: true, data: importer.status() });
+});
+
+// ── POST /import/stop ─────────────────────────────────────────────────────────
+router.post("/import/stop", (_req: Request, res: Response) => {
+  importer.stop();
+  res.json({ success: true, data: importer.status() });
 });
 
 export default router;

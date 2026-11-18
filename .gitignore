@@ -8,3 +8,5 @@ dist/
 !package-lock.json
 !tsconfig.json
 .vscode/
+!.env.example
+data/

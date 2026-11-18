@@ -206,9 +206,31 @@ export async function fetchMovieDetail(id: number | string): Promise<FWMovieDeta
   return get<FWMovieDetail>(`/movie/${id}`);
 }
 
-/** Series episodes by series_code */
+/** Series episodes by series_code — searches by title to find all related episodes */
 export async function fetchSeries(seriesCode: number | string): Promise<FWSeries> {
-  return get<FWSeries>(`/series/${seriesCode}`);
+  // First get the base movie to know the title
+  const base = await fetchMovieDetail(seriesCode);
+  if (!base.title) return { series_code: String(seriesCode), base_name: "", count: 0, episodes: [] };
+
+  // Extract clean title (strip episode/season suffixes)
+  const cleanTitle = base.title
+    .replace(/\s*(Season|Episode|Eps?|S\d+E\d+)[^]*/i, "")
+    .replace(/:\s*$/, "")
+    .trim();
+
+  // Search for all episodes with this title
+  const result = await get<FWSearchResult>(`/search?q=${encodeURIComponent(cleanTitle)}`);
+
+  // Collect all episodes across matching series entries
+  const seen = new Map<number, FWEpisode>();
+  for (const s of result.series ?? []) {
+    for (const ep of s.episodes ?? []) {
+      if (!seen.has(ep.id)) seen.set(ep.id, ep);
+    }
+  }
+
+  const episodes = Array.from(seen.values()).sort((a, b) => a.id - b.id);
+  return { series_code: String(seriesCode), base_name: cleanTitle, count: episodes.length, episodes };
 }
 
 /**

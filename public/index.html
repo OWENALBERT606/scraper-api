@@ -391,6 +391,32 @@
 
     /* ── Search results ── */
     .results-section { margin-bottom: 32px; }
+
+    .upload-btn {
+      background: var(--surface2);
+      color: var(--accent2);
+      border: 1px solid var(--accent2);
+    }
+    .upload-btn:hover { background: rgba(0,188,212,0.12); opacity: 1; }
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 1000;
+      max-width: 360px;
+      padding: 12px 18px;
+      border-radius: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--accent2);
+      color: var(--text);
+      font-size: 0.85rem;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      opacity: 0;
+      transform: translateY(12px);
+      pointer-events: none;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
   </style>
 </head>
 <body>
@@ -411,6 +437,8 @@
 <main id="main">
   <div class="spinner">Loading…</div>
 </main>
+
+<div id="toast"></div>
 
 <!-- Detail modal -->
 <div class="overlay" id="overlay" onclick="closeModal(event)">
@@ -551,12 +579,12 @@
       const m = json.data;
 
       let episodesHTML = '';
-      if (m.is_series && m.series_code) {
+      if (m.series_code) {
         try {
           const sr = await fetch(`${API}/series/${m.series_code}`);
           const sj = await sr.json();
           const eps = sj.data?.episodes || [];
-          if (eps.length > 1) {
+          if (eps.length > 0) {
             episodesHTML = `<div class="episodes-title">📋 Episodes (${eps.length})</div>` +
               eps.map((ep, i) => {
                 const epStream = ep.stream_url || ep.playingurl || '';
@@ -566,7 +594,7 @@
                   <div class="ep-num">${i + 1}</div>
                   <div class="ep-title">${ep.title || 'Episode ' + (i+1)}</div>
                   <div class="ep-meta">${ep.size || ''}</div>
-                  ${epStream ? `<a class="ep-dl" href="${epStream}" download="${epFile}" onclick="event.stopPropagation()" title="Download">⬇</a>` : ''}
+                  ${epStream ? `<a class="ep-dl" href="${epStream}" download="${epFile}" onclick="event.stopPropagation()" title="Download">⬇</a><button class="ep-dl" onclick="event.stopPropagation(); queueUpload({ id: ${ep.id} })" title="Download & Upload">⬆</button>` : ''}
                   <div class="ep-play">▶</div>
                 </div>`;
               }).join('');
@@ -591,6 +619,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zm-15 9v2h14v-2H4z"/></svg>
             Download
           </a>
+          <button class="play-btn upload-btn" onclick="queueUpload({ id: ${m.id} })">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+            Download &amp; Upload
+          </button>
         </div>` : '';
 
       document.getElementById('modalContent').innerHTML = `
@@ -641,6 +673,31 @@
     // stop video
     const v = document.getElementById('videoPlayer');
     if (v) { v.pause(); v.src = ''; }
+  }
+
+  async function queueUpload(payload) {
+    showToast('Queuing download…');
+    try {
+      const res = await fetch('/api/upload/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Queue failed');
+      showToast(`Queued ${json.queued} item(s) for upload`);
+    } catch (e) {
+      showToast(e.message || 'Queue failed');
+    }
+  }
+
+  let toastTimer;
+  function showToast(message) {
+    const el = document.getElementById('toast');
+    el.textContent = message;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
