@@ -6,6 +6,8 @@
  * Fallback API: https://pearlpix-api.onrender.com
  */
 
+import { looksLikeFilm } from "../importer/parse";
+
 const PRIMARY = "https://mumowatch.ai.studio";
 const FALLBACK = "https://pearlpix-api.onrender.com";
 
@@ -254,6 +256,8 @@ export async function fetchFullCatalog(
 
       // Flatten series episodes into list items
       for (const s of result.series ?? []) {
+        // FreeWatch files films under a "series" too: it is only a series when it has several episodes or says so in the title
+        const isRealSeries = !looksLikeFilm(s.title || "", (s.episodes ?? []).length);
         for (const ep of s.episodes ?? []) {
           if (!seen.has(ep.id)) {
             seen.set(ep.id, {
@@ -268,7 +272,7 @@ export async function fetchFullCatalog(
               ldur: "",
               state: "",
               playingurl: ep.playingurl,
-              is_series: true,
+              is_series: isRealSeries,
             } as FWMovieListItem);
           }
         }

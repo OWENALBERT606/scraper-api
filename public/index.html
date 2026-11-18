@@ -431,6 +431,7 @@
 
 <nav>
   <button class="tab active" onclick="showTab('all', this)">All</button>
+  <button class="tab" onclick="showTab('movies', this)">Movies</button>
   <button class="tab" onclick="showTab('series', this)">Series</button>
 </nav>
 
@@ -482,6 +483,8 @@
     if (tab === 'series') {
       const series = all.filter(m => m.is_series);
       renderGrid(series, 'Series', true);
+    } else if (tab === 'movies') {
+      renderGrid(all.filter(m => !m.is_series), 'Movies');
     } else {
       renderGrid(all, 'All Content');
     }
