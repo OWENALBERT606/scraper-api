@@ -15,6 +15,8 @@ export interface ImportConfig {
   minBytes: number;
   /** "link" (default): the movie points at the source's video address, nothing is downloaded; "copy": the video is copied into B2 */
   mode: "link" | "copy";
+  /** also import series (their seasons and episodes), not only films (default on) */
+  series: boolean;
   dataDir: string;
   /** run the import automatically every N minutes (0 = only when asked) */
   autorunMinutes: number;
@@ -58,6 +60,7 @@ export function loadImportConfig(env: NodeJS.ProcessEnv = process.env): { config
     createMissing: flag(env, "IMPORT_CREATE_MISSING", true),
     minBytes: num(env, "IMPORT_MIN_BYTES", 20 * 1024 * 1024),
     mode: clean(env.IMPORT_MODE).toLowerCase() === "copy" ? "copy" : "link",
+    series: flag(env, "IMPORT_SERIES", true),
     dataDir: clean(env.IMPORT_DATA_DIR) || path.join(process.cwd(), "data"),
     autorunMinutes: num(env, "IMPORT_AUTORUN_MINUTES", 0),
   };

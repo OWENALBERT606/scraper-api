@@ -122,3 +122,15 @@ test("platform: a refused sign-in is fatal and names the likely cause on a 404",
   const p = new Platform(config, (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch);
   await assert.rejects(p.signIn(), (e: Error & { fatal?: boolean }) => e.fatal === true && /PLATFORM_API_URL/.test(e.message));
 });
+
+test("platform: finds a series by title and VJ and reads its seasons and episodes", async () => {
+  const { platform } = fakePlatform((_m, path) => {
+    if (path.startsWith("/series?")) return { body: { data: [{ id: "s0", title: "Other", vj: { id: "v1" } }, { id: "s1", title: "Your Honor", vj: { id: "v1" } }, { id: "s2", title: "Your Honor", vj: { id: "v2" } }] } };
+    if (path === "/series/s1/seasons") return { body: { data: [{ id: "se1", seasonNumber: 2 }] } };
+    return { body: { data: [{ episodeNumber: 1 }, { episodeNumber: 3 }] } };
+  });
+  assert.equal((await platform.findSeries("Your Honor", "v1"))?.id, "s1");
+  assert.equal(await platform.findSeries("Your Honor", "v9"), null);
+  const tree = await platform.seriesTree("s1");
+  assert.deepEqual([...(tree.get(2)?.episodes ?? [])], [1, 3]);
+});

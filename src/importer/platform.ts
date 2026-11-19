@@ -182,4 +182,78 @@ export class Platform {
   async createMovie(payload: Record<string, unknown>): Promise<{ id: string; slug?: string; title: string }> {
     return (await this.request<{ data: { id: string; slug?: string; title: string } }>("POST", "/movies", payload)).data;
   }
+
+  // ── series, seasons, episodes ───────────────────────────────────────────────────────────────────────────────────
+
+  /** The platform's series with this title (and VJ), or null. Compared by normalised title. */
+  async findSeries(title: string, vjId?: string): Promise<{ id: string } | null> {
+    const r = await this.request<{ data?: { id: string; title: string; vj?: { id?: string } | null }[] }>("GET", `/series?${new URLSearchParams({ search: title, limit: "100" })}`);
+    const want = normalizeTitle(title);
+    const hit = (r.data ?? []).find((s) => normalizeTitle(s.title) === want && (!vjId || s.vj?.id === vjId));
+    return hit ? { id: hit.id } : null;
+  }
+
+  /** Every series on the platform (with its VJ), page by page. */
+  async listSeries(): Promise<{ id: string; title: string; vjId: string; vjName: string }[]> {
+    const out: { id: string; title: string; vjId: string; vjName: string }[] = [];
+    for (let page = 1; page <= 100; page++) {
+      const r = await this.request<{ data?: { id: string; title: string; vj?: { id?: string; name?: string } | null }[] }>("GET", `/series?${new URLSearchParams({ limit: "100", page: String(page) })}`);
+      const rows = r.data ?? [];
+      for (const s of rows) if (s.vj?.id) out.push({ id: s.id, title: s.title, vjId: s.vj.id, vjName: s.vj.name ?? "" });
+      if (rows.length < 100) break;
+    }
+    return out;
+  }
+
+  /** season number -> { id, episode numbers already there } */
+  async seriesTree(seriesId: string): Promise<Map<number, { id: string; episodes: Set<number> }>> {
+    const out = new Map<number, { id: string; episodes: Set<number> }>();
+    const seasons = (await this.request<{ data?: { id: string; seasonNumber: number }[] }>("GET", `/series/${seriesId}/seasons`)).data ?? [];
+    for (const se of seasons) {
+      const eps = (await this.request<{ data?: { episodeNumber: number }[] }>("GET", `/seasons/${se.id}/episodes`)).data ?? [];
+      out.set(se.seasonNumber, { id: se.id, episodes: new Set(eps.map((e) => e.episodeNumber)) });
+    }
+    return out;
+  }
+
+  async searchTmdbSeries(title: string): Promise<{ tmdbId: number | string | null; title: string; year: string | number | null }[]> {
+    try {
+      return (await this.request<{ data?: { tmdbId: number | string | null; title: string; year: string | number | null }[] }>("GET", `/metadata/search/series?title=${encodeURIComponent(title)}`)).data ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  async enrichSeries(tmdbId: number | string): Promise<Record<string, unknown> | null> {
+    try {
+      return (await this.request<{ data: Record<string, unknown> }>("GET", `/metadata/enrich/series/${tmdbId}`)).data ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async enrichEpisode(tmdbSeriesId: number | string, season: number, episode: number): Promise<Record<string, unknown> | null> {
+    try {
+      return (await this.request<{ data: Record<string, unknown> }>("GET", `/metadata/episode/${tmdbSeriesId}/${season}/${episode}`)).data ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async createSeries(payload: Record<string, unknown>): Promise<{ id: string; title: string }> {
+    return (await this.request<{ data: { id: string; title: string } }>("POST", "/series", payload)).data;
+  }
+
+  /** Adds an empty season and returns its id. */
+  async createSeason(seriesId: string, seasonNumber: number, extra: Record<string, unknown> = {}): Promise<string> {
+    await this.request("POST", `/series/${seriesId}/seasons`, { seasons: [{ seasonNumber, title: `Season ${seasonNumber}`, ...extra, episodes: [] }] });
+    const tree = await this.seriesTree(seriesId);
+    const id = tree.get(seasonNumber)?.id;
+    if (!id) throw new Error(`Season ${seasonNumber} could not be created`);
+    return id;
+  }
+
+  async createEpisode(seasonId: string, payload: Record<string, unknown>): Promise<{ id: string }> {
+    return (await this.request<{ data: { id: string } }>("POST", `/seasons/${seasonId}/episodes`, payload)).data;
+  }
 }

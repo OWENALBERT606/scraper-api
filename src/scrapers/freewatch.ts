@@ -209,7 +209,7 @@ export async function fetchMovieDetail(id: number | string): Promise<FWMovieDeta
 }
 
 /** "Your Honor Season 2: Episode 1" -> "Your Honor" (the title without its season / episode part) */
-function seriesBase(title: string): string {
+export function seriesBase(title: string): string {
   return title
     .replace(/[\s:\u2013\u2014-]*\b(season|series|episode|eps?\.?)\s*\d+[^]*$/i, "")
     .replace(/[\s:\u2013\u2014-]*\bs\d{1,2}\s*e\d{1,3}\b[^]*$/i, "")
@@ -217,10 +217,10 @@ function seriesBase(title: string): string {
     .trim();
 }
 
-const baseKey = (t: string) => seriesBase(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+export const baseKey = (t: string) => seriesBase(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /** [season, episode] read from a title; unknown parts are 0 */
-function seasonEpisode(title: string): [number, number] {
+export function seasonEpisode(title: string): [number, number] {
   const se = /\bs(\d{1,2})\s*e(\d{1,3})\b/i.exec(title);
   if (se) return [Number(se[1]), Number(se[2])];
   const season = /\b(?:season|series)\s*(\d+)/i.exec(title);
