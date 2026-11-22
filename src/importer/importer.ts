@@ -21,6 +21,26 @@ import {
 import { Platform, PlatformError } from "./platform";
 
 export type ItemStatus = "queued" | "checking" | "ready" | "downloading" | "saving" | "imported" | "skipped" | "failed";
+export type ImportMedia = "all" | "movies" | "series";
+
+/** MlegacyTV ids say what they are; FreeWatch falls back to the group size during processing. */
+export function mediaForId(id: string, source: Source["name"]): Exclude<ImportMedia, "all"> {
+  if (source === "mlegacytv") return id.startsWith("e:") || id.startsWith("s:") ? "series" : "movies";
+  return "movies";
+}
+
+/** Movies are discovered first at MlegacyTV; alternate them with episodes so one does not starve the other. */
+export function interleaveMlegacyIds(ids: string[]): string[] {
+  const movies: string[] = [];
+  const series: string[] = [];
+  for (const id of ids) (mediaForId(id, "mlegacytv") === "series" ? series : movies).push(id);
+  const out: string[] = [];
+  for (let m = 0, s = 0; m < movies.length || s < series.length; ) {
+    if (m < movies.length) out.push(movies[m++]);
+    if (s < series.length) out.push(series[s++]);
+  }
+  return out;
+}
 
 export interface ImportItem {
   sourceId: string;
@@ -45,6 +65,8 @@ export interface RunOptions {
   ids?: (string | number)[];
   /** forget earlier failures so those films are tried again (films already imported are still skipped) */
   retryFailed?: boolean;
+  /** restrict a run to films, series episodes, or both */
+  media?: ImportMedia;
 }
 
 export interface ImportStatus {
@@ -55,6 +77,7 @@ export interface ImportStatus {
   missing: string[];
   running: boolean;
   dryRun: boolean;
+  media: ImportMedia;
   startedAt?: string;
   finishedAt?: string;
   message: string;
@@ -87,6 +110,7 @@ export class Importer {
   private running = false;
   private stopRequested = false;
   private dryRun = false;
+  private media: ImportMedia = "all";
   private startedAt?: string;
   private finishedAt?: string;
   private message = "Idle";
@@ -118,6 +142,7 @@ export class Importer {
       missing: this.missing,
       running: this.running,
       dryRun: this.dryRun,
+      media: this.media,
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
       message: this.message,
@@ -193,6 +218,7 @@ export class Importer {
     this.running = true;
     this.stopRequested = false;
     this.dryRun = !!opts.dryRun;
+    this.media = opts.media === "movies" || opts.media === "series" ? opts.media : "all";
     this.startedAt = new Date().toISOString();
     this.finishedAt = undefined;
     this.items.clear();
@@ -218,8 +244,12 @@ export class Importer {
         }
         found.ids = [...all];
       }
+      if (this.source.name === "mlegacytv") {
+        found.ids = this.media === "all" ? interleaveMlegacyIds(found.ids) : found.ids.filter((id) => mediaForId(id, this.source.name) === this.media);
+      }
       const fresh = found.ids.filter((id) => !ledger.imported[id] && (ledger.failed[id]?.attempts ?? 0) < MAX_ATTEMPTS);
-      this.message = `${found.ids.length} titles found, ${found.ids.length - fresh.length} already handled earlier. Checking the rest…`;
+      const scope = this.media === "series" ? "series episodes" : this.media === "movies" ? "films" : "titles";
+      this.message = `${found.ids.length} ${scope} found, ${found.ids.length - fresh.length} already handled earlier. Checking the rest…`;
 
       const sections = await this.sectionGenres();
       let done = 0;
@@ -317,7 +347,10 @@ export class Importer {
       const url = detail.playingurl || "";
       if (!title) return skip("The source has no title for it");
       if (!url) return skip("The source has no video address");
-      if (detail.episode || (!detail.isFilm && !looksLikeFilm(detail.title || "", groupSize))) {
+      const isEpisode = Boolean(detail.episode) || (!detail.isFilm && !looksLikeFilm(detail.title || "", groupSize));
+      if (this.media === "series" && !isEpisode) return skip("Film skipped (series-only run)");
+      if (this.media === "movies" && isEpisode) return skip("Episode skipped (movies-only run)");
+      if (isEpisode) {
         if (!this.cfg.series) return skip("It looks like a series episode, not a film (series import is off)");
         return await this.processEpisode(item, detail, ledger, sections, skip);
       }

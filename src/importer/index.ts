@@ -21,4 +21,4 @@ export function startAllAutoruns(): void {
 }
 
 export { Importer } from "./importer";
-export type { ImportStatus, RunOptions } from "./importer";
+export type { ImportMedia, ImportStatus, RunOptions } from "./importer";

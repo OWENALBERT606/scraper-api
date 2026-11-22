@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { bestTmdbMatch, bytesToSize, cleanTitle, cleanVj, durationToSeconds, extensionOf, looksLikeFilm, normalizeTitle, safeKeyPart, secondsToLength, sizeToBytes } from "./parse";
 import { b2ObjectUrl, loadImportConfig } from "./config";
 import { Platform } from "./platform";
+import { B2Store } from "./b2";
+import { Importer, interleaveMlegacyIds, mediaForId } from "./importer";
+import type { Source } from "./sources";
 
 test("titles normalise to one form", () => {
   assert.equal(normalizeTitle("The Matrix: Reloaded!"), "matrix reloaded");
@@ -148,4 +151,51 @@ test("platform: importers share one sign-in", async () => {
   await a.signIn();
   await b.signIn();
   assert.equal(logins, 1);
+});
+
+test("Mlegacy ids identify films and series episodes", () => {
+  assert.equal(mediaForId("m:123", "mlegacytv"), "movies");
+  assert.equal(mediaForId("e:123", "mlegacytv"), "series");
+  assert.equal(mediaForId("s:123", "mlegacytv"), "series");
+});
+
+test("Mlegacy films and episodes alternate in an all-media run", () => {
+  assert.deepEqual(
+    interleaveMlegacyIds(["m:1", "m:2", "m:3", "e:1", "e:2"]),
+    ["m:1", "e:1", "m:2", "e:2", "m:3"]
+  );
+  assert.deepEqual(interleaveMlegacyIds(["e:1", "e:2"]), ["e:1", "e:2"]);
+  assert.deepEqual(interleaveMlegacyIds([]), []);
+});
+
+function mediaImporter(id: string, detail: { title: string; playingurl: string; isFilm?: boolean; episode?: { base: string; season: number; episode: number } }): Importer {
+  const source: Source = {
+    name: "freewatch",
+    label: "Test",
+    referer: "",
+    missing: () => [],
+    discover: async () => ({ ids: [id], groupSize: new Map() }),
+    detail: async () => detail,
+    sections: async () => new Map(),
+  };
+  return new Importer(
+    { PLATFORM_API_URL: "http://x.test/api/v1", PLATFORM_EMAIL: "a@b.c", PLATFORM_PASSWORD: "pw", IMPORT_DATA_DIR: "data-test-media" },
+    { platform: { signIn: async () => undefined } as unknown as Platform, store: {} as unknown as B2Store, source }
+  );
+}
+
+test("a series-only run skips films", async () => {
+  const result = await mediaImporter("media-film", { title: "Hope", playingurl: "https://x.test/hope.mp4", isFilm: true }).run({ dryRun: true, media: "series" });
+  assert.equal(result.counts.skipped, 1);
+  assert.match(result.items[0]?.reason ?? "", /series-only/);
+});
+
+test("a movies-only run skips series episodes", async () => {
+  const result = await mediaImporter("media-episode", {
+    title: "Show S1 E2",
+    playingurl: "https://x.test/show-s01e02.mp4",
+    episode: { base: "Show", season: 1, episode: 2 },
+  }).run({ dryRun: true, media: "movies" });
+  assert.equal(result.counts.skipped, 1);
+  assert.match(result.items[0]?.reason ?? "", /movies-only/);
 });
