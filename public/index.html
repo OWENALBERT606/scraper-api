@@ -108,6 +108,17 @@
       border-bottom-color: var(--accent);
     }
     .tab:hover:not(.active) { color: var(--text); }
+    .nav-spacer { flex: 1; }
+    .provider-label {
+      align-self: center;
+      padding-right: 6px;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .provider-tab.active { color: var(--accent2); border-bottom-color: var(--accent2); }
+    .load-more-wrap { display: flex; justify-content: center; margin-top: 24px; }
 
     /* ── Main ── */
     main { padding: 24px; }
@@ -430,9 +441,13 @@
 </header>
 
 <nav>
-  <button class="tab active" onclick="showTab('all', this)">All</button>
-  <button class="tab" onclick="showTab('movies', this)">Movies</button>
-  <button class="tab" onclick="showTab('series', this)">Series</button>
+  <button class="tab content-tab active" onclick="showTab('all', this)">All</button>
+  <button class="tab content-tab" onclick="showTab('movies', this)">Movies</button>
+  <button class="tab content-tab" onclick="showTab('series', this)">Series</button>
+  <span class="nav-spacer"></span>
+  <span class="provider-label">Source</span>
+  <button class="tab provider-tab active" onclick="setProvider('freewatch', this)">FreeWatch</button>
+  <button class="tab provider-tab" onclick="setProvider('mlegacytv', this)">MlegacyTV</button>
 </nav>
 
 <main id="main">
@@ -450,28 +465,66 @@
 </div>
 
 <script>
-  const API = '/api/freewatch';
+  let currentProvider = 'freewatch';
   let dashboardData = null;
   let currentTab = 'all';
+  let catalogOffset = 0;
+  let catalogMoviesTotal = 0;
+  let catalogSeriesTotal = 0;
+  const CATALOG_PAGE = 1000;
+
+  const api = () => `/api/${currentProvider}`;
 
   // ── Boot ──────────────────────────────────────────────────────────────────
   async function boot() {
-    setMain('<div class="spinner">Loading catalog… (first load ~15s, cached after)</div>');
+    setMain('<div class="spinner">Loading catalog…</div>');
+    dashboardData = null;
+    catalogOffset = 0;
+    catalogMoviesTotal = 0;
+    catalogSeriesTotal = 0;
     try {
-      const res = await fetch(`${API}/catalog`);
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
-      dashboardData = { movies: json.data.movies };
-      renderTab(currentTab);
+      await loadCatalog();
     } catch (e) {
       setMain('<div class="empty">Failed to load. Is the server running?</div>');
     }
   }
 
+  function setProvider(provider, el) {
+    if (provider === currentProvider) return;
+    currentProvider = provider;
+    document.querySelectorAll('.provider-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('searchInput').value = '';
+    boot();
+  }
+
+  async function loadCatalog(append = false) {
+    let items;
+    if (currentProvider === 'mlegacytv') {
+      const res = await fetch(`${api()}/catalog?type=all&limit=${CATALOG_PAGE}&offset=${catalogOffset}`);
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      catalogMoviesTotal = json.data.movies_total || 0;
+      catalogSeriesTotal = json.data.series_total || 0;
+      items = [...(json.data.movies || []), ...(json.data.series || [])];
+      catalogOffset += CATALOG_PAGE;
+    } else {
+      const res = await fetch(`${api()}/catalog`);
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      items = json.data.movies || [];
+    }
+    const previous = append && dashboardData ? dashboardData.movies : [];
+    dashboardData = { movies: [...previous, ...items] };
+    renderTab(currentTab);
+  }
+
+  function loadMore() { loadCatalog(true).catch(() => {}); }
+
   // ── Tab switching ─────────────────────────────────────────────────────────
   function showTab(tab, el) {
     currentTab = tab;
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.content-tab').forEach(t => t.classList.remove('active'));
     el.classList.add('active');
     document.getElementById('searchInput').value = '';
     if (dashboardData) renderTab(tab);
@@ -496,23 +549,36 @@
       setMain(`<div class="empty">No ${title} found.</div>`);
       return;
     }
-    const cards = items.map(m => cardHTML(m, isSeries)).join('');
+    const cards = items.map(m => cardHTML(m, isSeries || Boolean(m.is_series))).join('');
+    const remaining = Math.max(0, catalogMoviesTotal - catalogOffset) +
+                      Math.max(0, catalogSeriesTotal - catalogOffset);
+    const more = currentProvider === 'mlegacytv' && remaining > 0
+      ? `<div class="load-more-wrap"><button class="btn btn-ghost" onclick="loadMore()">Load more (${remaining} left)</button></div>`
+      : '';
     setMain(`
       <div class="section-title">
         ${isSeries ? '📺' : '🎬'} ${title}
         <span class="count">${items.length}</span>
       </div>
       <div class="grid">${cards}</div>
+      ${more}
     `);
+  }
+
+  function jsId(value) {
+    const s = String(value);
+    return /^\d+$/.test(s) ? s : `'${s.replace(/[^0-9a-zA-Z-]/g, '')}'`;
   }
 
   function cardHTML(m, isSeries = false) {
     const title = m.title || `Movie #${m.id}`;
     const poster = m.poster_url || m.image || '';
-    const vj = m.vj ? m.vj.trim() : '';
+    const rawVj = m.vj_name || m.vj || '';
+    const vj = typeof rawVj === 'string' && /^[0-9a-f]{8}-/i.test(rawVj) ? '' : String(rawVj).trim();
     const badge = isSeries ? `<span class="badge series">Series</span>` : '';
+    const seriesArg = currentProvider === 'mlegacytv' && isSeries ? 'true' : 'false';
     return `
-      <div class="card" onclick="openMovie(${m.id})">
+      <div class="card" onclick="openMovie('${String(m.id).replace(/[^0-9a-zA-Z-]/g, '')}', ${seriesArg})">
         ${badge}
         <div class="card-play">
           <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
@@ -537,7 +603,7 @@
 
     setMain('<div class="spinner">Searching…</div>');
     try {
-      const res = await fetch(`${API}/search?q=${encodeURIComponent(q)}`);
+      const res = await fetch(`${api()}/search?q=${encodeURIComponent(q)}`);
       const json = await res.json();
       const { movies = [], series = [] } = json.data;
 
@@ -553,9 +619,16 @@
       if (series.length) {
         // Flatten: show first episode of each series as a card
         const cards = series.map(s => {
-          const ep = s.episodes[0];
-          if (!ep) return '';
-          const fake = { id: ep.id, title: s.title, image: ep.image, poster_url: ep.poster_url, vj: ep.vj, is_series: true };
+          const ep = (s.episodes || [])[0];
+          const mltv = currentProvider === 'mlegacytv';
+          const fake = {
+            id: mltv ? s.id : (ep ? ep.id : s.series_code || s.id),
+            title: s.title || s.base_name || 'Series',
+            image: ep?.image || s.image || '',
+            poster_url: ep?.poster_url || s.poster_url || '',
+            vj: s.vj_name || s.vj || ep?.vj || '',
+            is_series: true
+          };
           return cardHTML(fake, true);
         }).join('');
         html += `<div class="results-section">
@@ -571,39 +644,71 @@
   }
 
   // ── Movie detail modal ────────────────────────────────────────────────────
-  async function openMovie(id) {
+  async function openMovie(id, isSeries = false) {
     document.getElementById('modalContent').innerHTML = '<div class="spinner" style="padding:60px">Loading…</div>';
     document.getElementById('overlay').classList.add('open');
     document.body.style.overflow = 'hidden';
 
     try {
-      const res = await fetch(`${API}/movies/${id}`);
-      const json = await res.json();
-      const m = json.data;
+      let m = {};
+      let eps = [];
+
+      if (isSeries) {
+        const res = await fetch(`${api()}/series/${id}`);
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error);
+        const s = json.data || {};
+        eps = s.episodes || [];
+        if (!eps.length && s.seasons) eps = s.seasons.flatMap(se => se.episodes || []);
+        m = {
+          id,
+          title: s.title || s.base_name || 'Series',
+          image: s.image || '',
+          poster_url: s.poster_url || s.image || (eps[0] ? eps[0].poster_url : '') || '',
+          vj: s.vj_name || s.vj || '',
+          description: s.overview || '',
+          stream_url: s.stream_url || s.playingurl || ''
+        };
+      } else {
+        const res = await fetch(`${api()}/movies/${id}`);
+        const json = await res.json();
+        if (!json.success) throw new Error(json.error);
+        m = json.data || {};
+        const rawVj = m.vj_name || m.vj || '';
+        m.vj = typeof rawVj === 'string' && /^[0-9a-f]{8}-/i.test(rawVj) ? '' : String(rawVj).trim();
+        if (m.series_code) {
+          try {
+            const sr = await fetch(`${api()}/series/${m.series_code}`);
+            const sj = await sr.json();
+            eps = sj.data?.episodes || [];
+          } catch {}
+        }
+      }
+
+      const seriesCode = isSeries ? id : m.series_code;
+      const migrateSeriesButton = seriesCode && eps.length
+        ? `<button class="play-btn upload-btn" style="margin-top:14px" onclick="queueUpload({ source: '${currentProvider}', seriesCode: ${jsId(seriesCode)} })">📤 Migrate all ${eps.length} episodes</button>`
+        : '';
 
       let episodesHTML = '';
-      if (m.is_series || m.series_code) {
-        try {
-          // the episodes are found from this entry's id (FreeWatch files every episode as its own entry)
-          const sr = await fetch(`${API}/series/${m.id}`);
-          const sj = await sr.json();
-          const eps = sj.data?.episodes || [];
-          if (eps.length > 0) {
-            episodesHTML = `<div class="episodes-title">📋 Episodes (${eps.length})</div>` +
-              eps.map((ep, i) => {
-                const epStream = ep.stream_url || ep.playingurl || '';
-                const epFile = (ep.title || 'Episode ' + (i+1)).replace(/[^a-zA-Z0-9 ]/g, '').trim() + '.mp4';
-                return `
-                <div class="episode-row" onclick="playEpisode('${epStream}', '${escape(ep.title || 'Episode ' + (i+1))}')">
-                  <div class="ep-num">${i + 1}</div>
-                  <div class="ep-title">${ep.title || 'Episode ' + (i+1)}</div>
-                  <div class="ep-meta">${ep.vj ? ep.vj.trim() + ' · ' : ''}${ep.size || ''}</div>
-                  ${epStream ? `<a class="ep-dl" href="${epStream}" download="${epFile}" onclick="event.stopPropagation()" title="Download">⬇</a><button class="ep-dl" onclick="event.stopPropagation(); queueUpload({ id: ${ep.id} })" title="Download & Upload">⬆</button>` : ''}
-                  <div class="ep-play">▶</div>
-                </div>`;
-              }).join('');
-          }
-        } catch {}
+      if (eps.length) {
+        episodesHTML = `<div class="episodes-title">📋 Episodes (${eps.length})</div>` +
+          eps.map((ep, i) => {
+            const epStream = ep.stream_url || ep.playingurl || '';
+            const epFile = (ep.title || 'Episode ' + (i+1)).replace(/[^a-zA-Z0-9 ]/g, '').trim() + '.mp4';
+            const safeStream = String(epStream).replace(/'/g, "\\'");
+            const epUpload = currentProvider === 'mlegacytv'
+              ? `{ source: 'mlegacytv', episodeId: ${jsId(ep.id)} }`
+              : `{ id: ${jsId(ep.id)} }`;
+            return `
+            <div class="episode-row" onclick="playEpisode('${safeStream}', '${escape(ep.title || 'Episode ' + (i+1))}')">
+              <div class="ep-num">${i + 1}</div>
+              <div class="ep-title">${ep.title || 'Episode ' + (i+1)}</div>
+              <div class="ep-meta">${ep.vj ? ep.vj.trim() + ' · ' : ''}${ep.size || ep.runtime || ''}</div>
+              ${epStream ? `<a class="ep-dl" href="${epStream}" download="${epFile}" onclick="event.stopPropagation()" title="Download">⬇</a><button class="ep-dl" onclick="event.stopPropagation(); queueUpload(${epUpload})" title="Download & Upload">⬆</button>` : ''}
+              <div class="ep-play">▶</div>
+            </div>`;
+          }).join('');
       }
 
       const streamUrl = m.stream_url || m.playingurl || '';
@@ -623,7 +728,7 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zm-15 9v2h14v-2H4z"/></svg>
             Download
           </a>
-          <button class="play-btn upload-btn" onclick="queueUpload({ id: ${m.id} })">
+          <button class="play-btn upload-btn" onclick="queueUpload({ source: '${currentProvider}', id: ${jsId(m.id)} })">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
             Download &amp; Upload
           </button>
@@ -642,10 +747,11 @@
             ${m.duration ? `<span>⏱ ${m.duration}</span>` : ''}
             ${m.size ? `<span>💾 ${m.size}</span>` : ''}
           </div>
-          ${m.description ? `<div class="modal-desc">${m.description}</div>` : ''}
+          ${(m.description || m.overview) ? `<div class="modal-desc">${m.description || m.overview}</div>` : ''}
           ${actionButtons}
           ${playerHTML}
           ${episodesHTML}
+          ${migrateSeriesButton}
         </div>`;
     } catch (e) {
       document.getElementById('modalContent').innerHTML = '<div class="empty">Failed to load details.</div>';

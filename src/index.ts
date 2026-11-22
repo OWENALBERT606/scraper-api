@@ -29,6 +29,12 @@ app.get("/health", (_req: Request, res: Response) => {
       "GET  /api/freewatch/series/:seriesCode",
       "GET  /api/freewatch/search?q=",
       "DELETE /api/freewatch/cache",
+      "GET    /api/mlegacytv/dashboard",
+      "GET    /api/mlegacytv/catalog?type=&limit=&offset=",
+      "GET    /api/mlegacytv/movies/:id",
+      "GET    /api/mlegacytv/series/:id",
+      "GET    /api/mlegacytv/search?q=",
+      "DELETE /api/mlegacytv/cache",
       "POST   /api/upload/queue",
       "POST   /api/upload/start",
       "GET    /api/upload/status",
@@ -48,5 +54,6 @@ app.listen(PORT, () => {
   console.log(`\nScraper API → http://localhost:${PORT}`);
   console.log(`  UI        : http://localhost:${PORT}/`);
   console.log(`  FreeWatch : /api/freewatch/dashboard | /movies/:id | /series/:id | /search?q=`);
+  console.log(`  MlegacyTV : /api/mlegacytv/dashboard | /catalog | /movies/:id | /series/:id | /search?q=`);
   console.log(`  Upload    : /api/upload/queue | /start | /status | /start-scheduler | /stop-scheduler`);
 });

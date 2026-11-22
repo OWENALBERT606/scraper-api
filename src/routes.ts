@@ -9,6 +9,14 @@ import {
   searchContent,
   clearFreeWatchCache,
 } from "./scrapers/freewatch";
+import {
+  fetchDashboard as fetchMltvDashboard,
+  fetchCatalog as fetchMltvCatalog,
+  fetchMovie as fetchMltvMovie,
+  fetchSeries as fetchMltvSeries,
+  searchContent as searchMltvContent,
+  clearMlegacytvCache,
+} from "./scrapers/mlegacytv";
 import { proxyBase, proxyUrl } from "./proxy";
 import { importer } from "./importer";
 import {
@@ -219,6 +227,130 @@ router.get("/freewatch/search", async (req: Request, res: Response) => {
 router.delete("/freewatch/cache", (_req: Request, res: Response) => {
   clearFreeWatchCache();
   res.json({ success: true, message: "FreeWatch cache cleared" });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MlegacyTV routes  (https://mlegacytv.com) — Supabase-backed catalog
+// ═══════════════════════════════════════════════════════════════════════════════
+
+type MltvItem = { image: string; playingurl: string };
+
+function enrichMltv<T extends MltvItem>(item: T): T & {
+  poster_url: string;
+  stream_url: string;
+} {
+  return {
+    ...item,
+    poster_url: item.image || "",
+    stream_url: rawStreamUrl(item.playingurl),
+  };
+}
+
+router.get("/mlegacytv/dashboard", async (_req: Request, res: Response) => {
+  try {
+    const data = await fetchMltvDashboard();
+    res.json({
+      success: true,
+      data: {
+        sections: data.sections.map((section) => ({
+          ...section,
+          items: section.items.map(enrichMltv),
+        })),
+        unique_movies: data.unique_movies,
+        unique_series: data.unique_series,
+        movies: data.movies.map(enrichMltv),
+        series: data.series.map(enrichMltv),
+        vjs: data.vjs,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
+  }
+});
+
+router.get("/mlegacytv/catalog", async (req: Request, res: Response) => {
+  try {
+    const type = (req.query.type as string) ?? "all";
+    if (!["all", "movies", "series"].includes(type)) {
+      res.status(400).json({ error: "type must be all, movies or series" });
+      return;
+    }
+    const data = await fetchMltvCatalog({
+      type: type as "all" | "movies" | "series",
+      limit: req.query.limit as string,
+      offset: req.query.offset as string,
+    });
+    res.json({
+      success: true,
+      data: {
+        total: data.total,
+        movies_total: data.movies_total,
+        series_total: data.series_total,
+        limit: Math.min(Math.max(Number(req.query.limit) || 100, 1), 1000),
+        offset: Math.max(Number(req.query.offset) || 0, 0),
+        movies: data.movies.map(enrichMltv),
+        series: data.series.map(enrichMltv),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed" });
+  }
+});
+
+router.get("/mlegacytv/movies/:id", async (req: Request, res: Response) => {
+  try {
+    const movie = await fetchMltvMovie(req.params.id);
+    if (!movie) { res.status(404).json({ error: "Movie not found" }); return; }
+    res.json({ success: true, data: enrichMltv(movie) });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Not found" });
+  }
+});
+
+router.get("/mlegacytv/series/:id", async (req: Request, res: Response) => {
+  try {
+    const series = await fetchMltvSeries(req.params.id);
+    if (!series) { res.status(404).json({ error: "Series not found" }); return; }
+    res.json({
+      success: true,
+      data: {
+        ...enrichMltv(series),
+        seasons: series.seasons.map((season) => ({
+          ...season,
+          episodes: season.episodes.map(enrichMltv),
+        })),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Not found" });
+  }
+});
+
+router.get("/mlegacytv/search", async (req: Request, res: Response) => {
+  const q = req.query.q as string;
+  if (!q) {
+    res.status(400).json({ error: "q query param is required" });
+    return;
+  }
+  try {
+    const data = await searchMltvContent(q);
+    res.json({
+      success: true,
+      data: {
+        query: data.query,
+        total: data.total,
+        movies: data.movies.map(enrichMltv),
+        series: data.series.map(enrichMltv),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Search failed" });
+  }
+});
+
+router.delete("/mlegacytv/cache", (_req: Request, res: Response) => {
+  clearMlegacytvCache();
+  res.json({ success: true, message: "MlegacyTV cache cleared" });
 });
 
 router.post("/upload/queue", async (req: Request, res: Response) => {

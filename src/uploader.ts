@@ -11,7 +11,15 @@ import {
   FWEpisode,
   FWMovieDetail,
 } from "./scrapers/freewatch";
+import {
+  fetchEpisode as fetchMltvEpisode,
+  fetchMovie as fetchMltvMovie,
+  fetchSeries as fetchMltvSeries,
+  MLTVEpisode,
+  MLTVMovie,
+} from "./scrapers/mlegacytv";
 
+export type UploadSource = "freewatch" | "mlegacytv";
 export type UploadStatus = "queued" | "downloading" | "uploading" | "done" | "failed";
 
 export type UploadMetadata = Record<string, unknown> & {
@@ -21,11 +29,13 @@ export type UploadMetadata = Record<string, unknown> & {
 
 export interface UploadRequest {
   id?: number | string;
+  episodeId?: number | string;
   seriesCode?: number | string;
   streamUrl?: string;
   title?: string;
   vj?: string;
   filename?: string;
+  source?: UploadSource;
   metadata?: Record<string, unknown>;
 }
 
@@ -107,7 +117,7 @@ function buildConfig(): UploaderConfig {
     videoField: process.env.UPLOAD_FIELD_VIDEO ?? "video",
     metadataField: process.env.UPLOAD_FIELD_METADATA ?? "metadata",
     flatFields: (process.env.UPLOAD_FLAT_FIELDS ??
-      "id,title,vj,description,image,poster_url,duration,size,series_code,category_id,is_series,playingurl")
+      "id,source,title,vj,description,image,poster_url,duration,size,series_code,category_id,is_series,playingurl,season_number,season_id,episode_order,tmdb_id,category,overview")
       .split(",")
       .map((f) => f.trim())
       .filter(Boolean),
@@ -158,6 +168,7 @@ function detailMetadata(detail: FWMovieDetail, overrides: UploadRequest): Upload
   return {
     id: detail.id,
     source_id: detail.id,
+    source: "freewatch",
     title: detail.title || overrides.title || "",
     vj: detail.vj || overrides.vj || "",
     description: detail.description || "",
@@ -179,6 +190,7 @@ function episodeMetadata(episode: FWEpisode, seriesTitle: string): UploadMetadat
   return {
     id: episode.id,
     source_id: episode.id,
+    source: "freewatch",
     title: episode.title || seriesTitle || "",
     vj: episode.vj || "",
     description: "",
@@ -191,6 +203,55 @@ function episodeMetadata(episode: FWEpisode, seriesTitle: string): UploadMetadat
     type: episode.type || "",
     is_series: true,
     playingurl: episode.playingurl || "",
+  };
+}
+
+function mltvMovieMetadata(movie: MLTVMovie): UploadMetadata {
+  return {
+    id: movie.id,
+    source_id: movie.id,
+    source: "mlegacytv",
+    title: movie.title || "",
+    vj: movie.vj_name || "",
+    description: movie.overview || "",
+    image: movie.image || "",
+    poster_url: movie.cover || movie.image || "",
+    duration: movie.duration || "",
+    size: "",
+    series_code: "",
+    category_id: movie.category || "",
+    category: movie.category || "",
+    type: movie.type || "Movie",
+    is_series: false,
+    playingurl: movie.playingurl || "",
+    tmdb_id: movie.tmdb_id || "",
+    genre: movie.genre || [],
+    overview: movie.overview || "",
+    premium: movie.premium,
+  };
+}
+
+function mltvEpisodeMetadata(episode: MLTVEpisode, seriesTitle: string): UploadMetadata {
+  return {
+    id: episode.id,
+    source_id: episode.id,
+    source: "mlegacytv",
+    title: episode.title || seriesTitle || "",
+    vj: "",
+    description: episode.overview || "",
+    overview: episode.overview || "",
+    image: episode.image || "",
+    poster_url: episode.image || "",
+    duration: episode.runtime || "",
+    size: "",
+    series_code: episode.season_id ? String(episode.season_id) : "",
+    category_id: "",
+    type: "Episode",
+    is_series: true,
+    playingurl: episode.playingurl || "",
+    season_id: episode.season_id,
+    season_number: episode.season_number ?? "",
+    episode_order: episode.order ?? "",
   };
 }
 
@@ -207,6 +268,7 @@ function explicitMetadata(request: UploadRequest): UploadMetadata {
   return {
     id: request.id ?? "",
     source_id: request.id ?? "",
+    source: request.source ?? "freewatch",
     title: request.title || safeName(urlBasename(streamUrl)),
     vj: request.vj || "",
     stream_url: streamUrl,
@@ -240,28 +302,66 @@ export async function enqueueUploads(requests: UploadRequest[]): Promise<UploadJ
   const created: UploadJob[] = [];
 
   for (const request of requests) {
-    if (request.seriesCode !== undefined && request.seriesCode !== null && request.seriesCode !== "") {
-      const series = await fetchSeries(request.seriesCode);
-      if (series.episodes.length === 0) {
-        throw new Error(`No episodes found for series ${request.seriesCode}`);
-      }
-      for (const episode of series.episodes) {
-        if (!episode.playingurl) continue;
-        created.push(createJob(episode.playingurl, episodeMetadata(episode, series.base_name)));
-      }
-      continue;
-    }
+    const source = request.source ?? "freewatch";
 
-    if (request.id !== undefined && request.id !== null && request.id !== "") {
-      const detail = await fetchMovieDetail(request.id);
-      const streamUrl = detail.playingurl || request.streamUrl || "";
-      if (!streamUrl) throw new Error(`No stream URL for item ${request.id}`);
-      created.push(createJob(streamUrl, detailMetadata(detail, request), request.filename));
-      continue;
+    if (source === "mlegacytv") {
+      if (request.seriesCode !== undefined && request.seriesCode !== null && request.seriesCode !== "") {
+        const series = await fetchMltvSeries(request.seriesCode);
+        if (!series || series.total_episodes === 0) {
+          throw new Error(`No episodes found for series ${request.seriesCode}`);
+        }
+        let queued = 0;
+        for (const season of series.seasons) {
+          for (const episode of season.episodes) {
+            if (!episode.playingurl) continue;
+            created.push(createJob(episode.playingurl, mltvEpisodeMetadata(episode, series.title)));
+            queued++;
+          }
+        }
+        if (queued === 0) throw new Error(`No streamable episodes for series ${request.seriesCode}`);
+        continue;
+      }
+
+      if (request.episodeId !== undefined && request.episodeId !== null && request.episodeId !== "") {
+        const episode = await fetchMltvEpisode(request.episodeId);
+        if (!episode) throw new Error(`Episode not found: ${request.episodeId}`);
+        if (!episode.playingurl) throw new Error(`No stream URL for episode ${request.episodeId}`);
+        created.push(createJob(episode.playingurl, mltvEpisodeMetadata(episode, "")));
+        continue;
+      }
+
+      if (request.id !== undefined && request.id !== null && request.id !== "") {
+        const movie = await fetchMltvMovie(request.id);
+        if (!movie) throw new Error(`Movie not found: ${request.id}`);
+        const streamUrl = movie.playingurl || request.streamUrl || "";
+        if (!streamUrl) throw new Error(`No stream URL for item ${request.id}`);
+        created.push(createJob(streamUrl, mltvMovieMetadata(movie), request.filename));
+        continue;
+      }
+    } else {
+      if (request.seriesCode !== undefined && request.seriesCode !== null && request.seriesCode !== "") {
+        const series = await fetchSeries(request.seriesCode);
+        if (series.episodes.length === 0) {
+          throw new Error(`No episodes found for series ${request.seriesCode}`);
+        }
+        for (const episode of series.episodes) {
+          if (!episode.playingurl) continue;
+          created.push(createJob(episode.playingurl, episodeMetadata(episode, series.base_name)));
+        }
+        continue;
+      }
+
+      if (request.id !== undefined && request.id !== null && request.id !== "") {
+        const detail = await fetchMovieDetail(request.id);
+        const streamUrl = detail.playingurl || request.streamUrl || "";
+        if (!streamUrl) throw new Error(`No stream URL for item ${request.id}`);
+        created.push(createJob(streamUrl, detailMetadata(detail, request), request.filename));
+        continue;
+      }
     }
 
     if (!request.streamUrl || typeof request.streamUrl !== "string") {
-      throw new Error("Each item needs id, seriesCode, or streamUrl");
+      throw new Error("Each item needs id, seriesCode, episodeId, or streamUrl");
     }
     try {
       new URL(request.streamUrl);
@@ -279,11 +379,15 @@ async function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function downloadHeaders(): Record<string, string> {
+function downloadHeaders(job: UploadJob): Record<string, string> {
+  const referer =
+    job.metadata.source === "mlegacytv"
+      ? "https://mlegacytv.com/"
+      : "https://www.freewatchug.online/";
   return {
     "User-Agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-    Referer: "https://www.freewatchug.online/",
+    Referer: referer,
   };
 }
 
@@ -296,7 +400,7 @@ async function downloadFile(job: UploadJob): Promise<string> {
     let fileStream: fs.WriteStream | null = null;
 
     try {
-      const response = await fetch(job.streamUrl, { headers: downloadHeaders() });
+      const response = await fetch(job.streamUrl, { headers: downloadHeaders(job) });
       if (!response.ok || !response.body) {
         throw new Error(`Download failed with HTTP ${response.status}`);
       }
