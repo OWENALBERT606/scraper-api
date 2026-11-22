@@ -134,3 +134,18 @@ test("platform: finds a series by title and VJ and reads its seasons and episode
   const tree = await platform.seriesTree("s1");
   assert.deepEqual([...(tree.get(2)?.episodes ?? [])], [1, 3]);
 });
+
+test("platform: importers share one sign-in", async () => {
+  const { config } = loadImportConfig({ PLATFORM_API_URL: "http://x.test/api/v1", PLATFORM_EMAIL: "a@b.c", PLATFORM_PASSWORD: "pw" });
+  let logins = 0;
+  const f = (async (url: string) => {
+    if (String(url).endsWith("/login")) logins++;
+    return new Response(JSON.stringify({ data: { accessToken: "t" } }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const a = new Platform(config, f);
+  const b = new Platform(config, f);
+  await Promise.all([a.signIn(), b.signIn()]);
+  await a.signIn();
+  await b.signIn();
+  assert.equal(logins, 1);
+});

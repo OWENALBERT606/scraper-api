@@ -205,7 +205,9 @@ export class Importer {
         ledger.failed = {};
         await this.writeLedger(ledger);
       }
-      const found = opts.ids?.length ? { ids: opts.ids.map(String), groupSize: new Map<string, number>() } : await this.discover();
+      const found = opts.ids?.length
+        ? { ids: this.source.expand ? await this.source.expand(opts.ids.map(String)) : opts.ids.map(String), groupSize: new Map<string, number>() }
+        : await this.discover();
       if (this.source.name === "freewatch" && this.cfg.series && !opts.ids?.length && !this.stopRequested) {
         // series already on the platform: look for episodes the source has that the platform does not
         const missing = await this.missingEpisodes();

@@ -34,6 +34,8 @@ export interface Source {
   /** every id worth looking at, and how many entries share a group (FreeWatch only) */
   discover(note: (message: string) => void): Promise<{ ids: string[]; groupSize: Map<string, number> }>;
   detail(id: string): Promise<SourceDetail | null>;
+  /** turns ids given by hand into the ids to process (e.g. a whole series into its episodes) */
+  expand?(ids: string[]): Promise<string[]>;
   /** category id -> genre name for sources that give genres as categories */
   sections(): Promise<Map<number, string>>;
 }
@@ -108,12 +110,41 @@ const yearOf = (iso: string | null | undefined): number | null => {
   const y = Number((iso ?? "").slice(0, 4));
   return y >= 1900 && y <= 2100 ? y : null;
 };
+/** MlegacyTV gives a bare number of minutes ("106"); the importer reads a bare number as seconds */
+const mins = (d: string | undefined): string => (d && /^\d{1,3}$/.test(d.trim()) ? `${d.trim()} min` : d ?? "");
 const numericTmdb = (v: string | undefined): string | undefined => (v && /^\d+$/.test(v.trim()) ? v.trim() : undefined);
 
 /** MlegacyTV: a Supabase-backed catalogue that lists every film and every series with all of its seasons and episodes. */
 export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
   // filled while discovering, so reading a detail later needs no further request
   const details = new Map<string, SourceDetail>();
+
+  /** Reads one series with every season and episode into `details`. */
+  const readSeries = async (seriesId: string): Promise<void> => {
+    const full = await mltv.fetchSeries(seriesId).catch(() => null);
+    if (!full) return;
+    full.seasons.forEach((season, si) => {
+      if (season.published === false) return;
+      const seasonNumber = season.order ?? (Number(/\d+/.exec(season.title)?.[0]) || si + 1);
+      season.episodes.forEach((ep, ei) => {
+        if (!ep.playingurl || ep.published === false) return;
+        const episodeNumber = ep.order ?? ei + 1;
+        details.set(`e:${ep.id}`, {
+          title: `${full.title} S${seasonNumber} E${episodeNumber}`,
+          vj: full.vj_name,
+          playingurl: ep.playingurl,
+          duration: mins(ep.runtime),
+          image: ep.image || full.cover || full.image,
+          description: full.overview, // the series' own description (episodes carry theirs below)
+          genreName: full.genre[0] || full.category || undefined,
+          year: yearOf(full.release_date),
+          episode: { base: full.title, season: seasonNumber, episode: episodeNumber, title: ep.title, overview: ep.overview },
+          tmdbId: numericTmdb(full.tmdb_id),
+        });
+      });
+    });
+  };
+
 
   return {
     name: "mlegacytv",
@@ -134,7 +165,7 @@ export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
             title: m.title,
             vj: m.vj_name,
             playingurl: m.playingurl,
-            duration: m.duration,
+            duration: mins(m.duration),
             image: m.cover || m.image,
             description: m.overview,
             genreName: m.genre[0] || m.category || undefined,
@@ -161,32 +192,23 @@ export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
           const s = seriesList[next++];
           if (!s) return;
           note(`Reading MlegacyTV series… ${++done} of ${seriesList.length}`);
-          const full = await mltv.fetchSeries(s.id).catch(() => null);
-          if (!full) continue;
-          full.seasons.forEach((season, si) => {
-            if (season.published === false) return;
-            const seasonNumber = season.order ?? (Number(/\d+/.exec(season.title)?.[0]) || si + 1);
-            season.episodes.forEach((ep, ei) => {
-              if (!ep.playingurl || ep.published === false) return;
-              const episodeNumber = ep.order ?? ei + 1;
-              details.set(`e:${ep.id}`, {
-                title: `${full.title} S${seasonNumber} E${episodeNumber}`,
-                vj: full.vj_name,
-                playingurl: ep.playingurl,
-                duration: ep.runtime,
-                image: ep.image || full.cover || full.image,
-                description: full.overview, // the series' own description (episodes carry theirs below)
-                genreName: full.genre[0] || full.category || undefined,
-                year: yearOf(full.release_date),
-                episode: { base: full.title, season: seasonNumber, episode: episodeNumber, title: ep.title, overview: ep.overview },
-                tmdbId: numericTmdb(full.tmdb_id),
-              });
-            });
-          });
+          await readSeries(s.id);
         }
       };
       await Promise.all(Array.from({ length: 4 }, worker));
       return { ids: [...details.keys()], groupSize: new Map() };
+    },
+
+    async expand(ids) {
+      const out: string[] = [];
+      for (const id of ids) {
+        if (id.startsWith("s:")) {
+          const before = new Set(details.keys());
+          await readSeries(id.slice(2));
+          out.push(...[...details.keys()].filter((k) => !before.has(k) && k.startsWith("e:")));
+        } else out.push(id);
+      }
+      return out;
     },
 
     async detail(id) {
@@ -196,7 +218,7 @@ export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
       if (id.startsWith("m:")) {
         const m = await mltv.fetchMovie(id.slice(2));
         if (!m || !m.playingurl) return null;
-        return { title: m.title, vj: m.vj_name, playingurl: m.playingurl, duration: m.duration, image: m.cover || m.image, description: m.overview, genreName: m.genre[0] || m.category || undefined, year: m.year, tmdbId: numericTmdb(m.tmdb_id), isFilm: true };
+        return { title: m.title, vj: m.vj_name, playingurl: m.playingurl, duration: mins(m.duration), image: m.cover || m.image, description: m.overview, genreName: m.genre[0] || m.category || undefined, year: m.year, tmdbId: numericTmdb(m.tmdb_id), isFilm: true };
       }
       return null;
     },

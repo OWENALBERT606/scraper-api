@@ -30,20 +30,60 @@ export interface TitleCheck {
  * Talks to the MovieChamp256 Go API as an administrator account: finds or creates VJs, genres and years, checks whether a
  * film already exists, asks for TMDB metadata, and creates the movie. It signs in again by itself when the token expires.
  */
+
+/**
+ * One sign-in is shared by every importer in the process (FreeWatch and MlegacyTV), and reused for a few minutes: the API
+ * allows only a handful of sign-ins per 15 minutes, and each importer signing in at every run used them all up.
+ */
+interface Session {
+  token: string;
+  at: number;
+  pending?: Promise<string>;
+}
+const SESSION_REUSE_MS = 10 * 60_000;
+const sessions = new WeakMap<object, Map<string, Session>>();
+
 export class Platform {
-  private token = "";
   private vjs: NamedRow[] | null = null;
   private genres: NamedRow[] | null = null;
   private years: YearRow[] | null = null;
 
   constructor(private cfg: ImportConfig, private fetchImpl: typeof fetch = fetch) {}
 
-  /** Signs in now, so a wrong address or password is found before any film is looked at. */
+  private get session(): Session {
+    let byKey = sessions.get(this.fetchImpl);
+    if (!byKey) sessions.set(this.fetchImpl, (byKey = new Map()));
+    const key = `${this.cfg.platformUrl}|${this.cfg.email}`;
+    let s = byKey.get(key);
+    if (!s) byKey.set(key, (s = { token: "", at: 0 }));
+    return s;
+  }
+
+  private get token(): string {
+    return this.session.token;
+  }
+  private set token(v: string) {
+    this.session.token = v;
+    if (!v) this.session.at = 0;
+  }
+
+  /** Signs in (or reuses a recent sign-in), so a wrong address or password is found before any film is looked at. */
   async signIn(): Promise<void> {
+    const s = this.session;
+    if (s.token && Date.now() - s.at < SESSION_REUSE_MS) return;
     await this.login();
   }
 
+  /** Signs in; importers that ask at the same moment share one request. */
   private async login(): Promise<void> {
+    const s = this.session;
+    s.pending ??= this.loginRequest().finally(() => {
+      s.pending = undefined;
+    });
+    await s.pending;
+  }
+
+  private async loginRequest(): Promise<string> {
     const res = await this.fetchImpl(`${this.cfg.platformUrl}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -57,7 +97,9 @@ export class Platform {
       err.fatal = true;
       throw err;
     }
-    this.token = json.data.accessToken;
+    this.session.token = json.data.accessToken;
+    this.session.at = Date.now();
+    return json.data.accessToken;
   }
 
   private async request<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
