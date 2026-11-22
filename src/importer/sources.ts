@@ -150,7 +150,11 @@ export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
     name: "mlegacytv",
     label: "MlegacyTV",
     referer: "https://mlegacytv.com/",
-    missing: () => ["MLEGACYTV_SUPABASE_URL", "MLEGACYTV_SUPABASE_KEY"].filter((k) => !(env[k] ?? "").trim()),
+    missing: () => [
+      "MLEGACYTV_SUPABASE_URL",
+      "MLEGACYTV_SUPABASE_KEY",
+      ...mltv.playbackCredentialsMissing(),
+    ].filter((k) => !(env[k] ?? "").trim()),
 
     async discover(note) {
       details.clear();
@@ -213,12 +217,12 @@ export function mlegacySource(env: NodeJS.ProcessEnv = process.env): Source {
 
     async detail(id) {
       const known = details.get(id);
-      if (known) return known;
+      if (known) return { ...known, playingurl: await mltv.resolvePlaybackUrl(known.playingurl) };
       // a single film asked for by id ("m:<uuid>") without a full discovery
       if (id.startsWith("m:")) {
         const m = await mltv.fetchMovie(id.slice(2));
         if (!m || !m.playingurl) return null;
-        return { title: m.title, vj: m.vj_name, playingurl: m.playingurl, duration: mins(m.duration), image: m.cover || m.image, description: m.overview, genreName: m.genre[0] || m.category || undefined, year: m.year, tmdbId: numericTmdb(m.tmdb_id), isFilm: true };
+        return { title: m.title, vj: m.vj_name, playingurl: await mltv.resolvePlaybackUrl(m.playingurl), duration: mins(m.duration), image: m.cover || m.image, description: m.overview, genreName: m.genre[0] || m.category || undefined, year: m.year, tmdbId: numericTmdb(m.tmdb_id), isFilm: true };
       }
       return null;
     },

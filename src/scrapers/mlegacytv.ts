@@ -17,6 +17,81 @@ const HEADERS: Record<string, string> = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
 };
 
+const ACCOUNT_EMAIL = process.env.MLEGACYTV_EMAIL ?? "";
+const ACCOUNT_PASSWORD = process.env.MLEGACYTV_PASSWORD ?? "";
+const PLAYBACK_API = "https://mlegacytv.com/api/playback-url";
+
+interface Session {
+  token: string;
+  expiresAt: number;
+  pending?: Promise<string>;
+}
+const session: Session = { token: "", expiresAt: 0 };
+const playbackCache = new Map<string, string>();
+const playbackPending = new Map<string, Promise<string>>();
+
+/** The catalogue's video_link values are stale; the site resolves them with a signed-in call to its playback API. */
+export function playbackCredentialsMissing(): string[] {
+  return [
+    ["MLEGACYTV_EMAIL", ACCOUNT_EMAIL],
+    ["MLEGACYTV_PASSWORD", ACCOUNT_PASSWORD],
+  ]
+    .filter(([, value]) => !value.trim())
+    .map(([name]) => name);
+}
+
+async function accessToken(fetchImpl: typeof fetch = fetch): Promise<string> {
+  if (session.token && Date.now() < session.expiresAt) return session.token;
+  if (session.pending) return session.pending;
+  const missing = playbackCredentialsMissing();
+  if (missing.length) throw new Error(`MLEGACYTV_EMAIL / MLEGACYTV_PASSWORD are not set — cannot resolve MlegacyTV video links`);
+
+  session.pending = (async () => {
+    const res = await fetchImpl(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
+      body: JSON.stringify({ email: ACCOUNT_EMAIL, password: ACCOUNT_PASSWORD }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const json = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; msg?: string };
+    if (!res.ok || !json.access_token) throw new Error(`MlegacyTV sign-in failed (${res.status}): ${json.msg ?? "invalid credentials"}`);
+    session.token = json.access_token;
+    session.expiresAt = Date.now() + Math.max(60, (Number(json.expires_in) || 3600) - 60) * 1000;
+    return session.token;
+  })().finally(() => {
+    session.pending = undefined;
+  });
+  return session.pending;
+}
+
+/** Turns a stale catalogue video_link into the current playable address from mlegacytv.com. */
+export async function resolvePlaybackUrl(url: string | null | undefined, fetchImpl: typeof fetch = fetch): Promise<string> {
+  const original = String(url ?? "").trim();
+  if (!original) return "";
+  const cached = playbackCache.get(original);
+  if (cached) return cached;
+  const pending = playbackPending.get(original);
+  if (pending) return pending;
+
+  const task = (async () => {
+    const token = await accessToken(fetchImpl);
+    const res = await fetchImpl(PLAYBACK_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ url: original }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const json = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+    if (!res.ok || !json.url) throw new Error(`MlegacyTV playback resolver failed (${res.status}): ${json.error ?? "no playable URL returned"}`);
+    playbackCache.set(original, json.url);
+    return json.url;
+  })().finally(() => {
+    playbackPending.delete(original);
+  });
+  playbackPending.set(original, task);
+  return task;
+}
+
 export interface MLTVVj {
   id: string;
   name: string;
