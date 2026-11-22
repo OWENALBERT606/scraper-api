@@ -362,8 +362,19 @@ export class Importer {
         const name = detail.genreName || sections.get(Number(detail.category_id));
         if (name) genreId = (await this.platform.ensureGenre(name)).id;
       }
-      if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no metadata match and an unknown category)");
-      let yearId = (meta?.yearId as string | null) || "";
+      // last resort: the platform's OMDb / IMDb lookup (the same one the single-movie upload uses)
+      let imdb: Record<string, unknown> | null = null;
+      if (!genreId) {
+        const want = normalizeTitle(officialTitle);
+        const y = year ?? detail.year ?? null;
+        const pick = (await this.platform.searchTmdb(officialTitle)).find(
+          (h) => h.imdbId && normalizeTitle(h.title) === want && (!y || !h.year || String(h.year).startsWith(String(y)))
+        );
+        imdb = pick?.imdbId ? await this.platform.enrichImdb(String(pick.imdbId)) : null;
+        genreId = (imdb?.genreId as string | null) || "";
+      }
+      if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no TMDB match, unknown category, and nothing on OMDb/IMDb)");
+      let yearId = (meta?.yearId as string | null) || (imdb?.yearId as string | null) || "";
       if (!yearId) {
         const y = year ?? detail.year ?? (detail.timestamp ? new Date(detail.timestamp.replace(" ", "T") + "Z").getUTCFullYear() : new Date().getUTCFullYear());
         yearId = (await this.platform.ensureYear(y)).id;
@@ -479,7 +490,20 @@ export class Importer {
 
     let uploadedKey: string | null = null;
     try {
-      // the series and the season exist before the video is copied (made one at a time per series)
+      // the video goes to B2 while it downloads
+      let videoUrl = url;
+      let sizeBytes = sizeToBytes(detail.size);
+      if (this.cfg.mode === "copy") {
+        this.touch(item, { status: "downloading", reason: undefined });
+        const key = `${randomUUID()}-${safeKeyPart(base)} S${season}E${episode} ${safeKeyPart(vjName)}.${ext || "mp4"}`;
+        uploadedKey = key;
+        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }), undefined, this.source.referer);
+        videoUrl = b2ObjectUrl(this.cfg.b2, key.split("/").map(encodeURIComponent).join("/"));
+        sizeBytes = copied.bytes;
+      }
+
+      // the series and the season are made only now, once the video has been copied, so a failed copy leaves nothing behind
+      // (made one at a time per series)
       const seasonId = await this.exclusive(state, async () => {
         if (!state.id) {
           const hit = detail.tmdbId ? { tmdbId: detail.tmdbId, title: base, year: null } : bestTmdbMatch(base, parsed.year, await this.platform.searchTmdbSeries(base));
@@ -491,7 +515,7 @@ export class Importer {
             const name = detail.genreName || sections.get(Number(detail.category_id));
             if (name) genreId = (await this.platform.ensureGenre(name)).id;
           }
-          if (!genreId) throw new Error("No genre could be decided for the series (no metadata match and an unknown category)");
+          if (!genreId) throw new Error("No genre could be decided for the series (no TMDB match and an unknown category)");
           let yearId = (meta?.yearId as string | null) || "";
           if (!yearId) yearId = (await this.platform.ensureYear(parsed.year ?? new Date().getUTCFullYear())).id;
           const poster = String(meta?.poster || detail.image || "");
@@ -527,18 +551,10 @@ export class Importer {
         state.tree.set(season, { id, episodes: new Set() });
         return id;
       });
-      if (state.tree.get(season)?.episodes.has(episode)) return skip("Already on the platform (created while this ran)");
-
-      // the video goes to B2 while it downloads
-      let videoUrl = url;
-      let sizeBytes = sizeToBytes(detail.size);
-      if (this.cfg.mode === "copy") {
-        this.touch(item, { status: "downloading", reason: undefined });
-        const key = `${randomUUID()}-${safeKeyPart(base)} S${season}E${episode} ${safeKeyPart(vjName)}.${ext || "mp4"}`;
-        uploadedKey = key;
-        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }), undefined, this.source.referer);
-        videoUrl = b2ObjectUrl(this.cfg.b2, key.split("/").map(encodeURIComponent).join("/"));
-        sizeBytes = copied.bytes;
+      if (state.tree.get(season)?.episodes.has(episode)) {
+        if (uploadedKey) await this.store.remove(uploadedKey).catch(() => undefined); // another worker made it first: drop our copy
+        uploadedKey = null;
+        return skip("Already on the platform (created while this ran)");
       }
 
       // the episode, with the metadata TMDB has for it

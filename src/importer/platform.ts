@@ -201,9 +201,9 @@ export class Platform {
     return { duplicate: !!r.duplicate, existsAnyVj: (r.data ?? []).length > 0 };
   }
 
-  async searchTmdb(title: string): Promise<{ tmdbId: number | string | null; title: string; year: string | number | null }[]> {
+  async searchTmdb(title: string): Promise<{ tmdbId: number | string | null; title: string; year: string | number | null; imdbId?: string | null }[]> {
     try {
-      const r = await this.request<{ data?: { tmdbId: number | string | null; title: string; year: string | number | null }[] }>(
+      const r = await this.request<{ data?: { tmdbId: number | string | null; title: string; year: string | number | null; imdbId?: string | null }[] }>(
         "GET",
         `/metadata/search/movie?title=${encodeURIComponent(title)}`
       );
@@ -216,6 +216,15 @@ export class Platform {
   async enrich(tmdbId: number | string): Promise<Record<string, unknown> | null> {
     try {
       return (await this.request<{ data: Record<string, unknown> }>("GET", `/metadata/enrich/movie/${tmdbId}`)).data ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Metadata from OMDb (IMDb) by IMDb id, the route the single-movie upload uses. */
+  async enrichImdb(imdbId: string): Promise<Record<string, unknown> | null> {
+    try {
+      return (await this.request<{ data: Record<string, unknown> }>("GET", `/metadata/enrich/movie/imdb/${imdbId}`)).data ?? null;
     } catch {
       return null;
     }

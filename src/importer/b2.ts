@@ -45,7 +45,19 @@ export class B2Store {
    * the size announced by the source and against what B2 reports afterwards; on any failure the partial object is removed.
    */
   async copy(sourceUrl: string, key: string, onProgress: (bytes: number, total: number) => void, signal?: AbortSignal, referer?: string): Promise<Copied> {
-    const res = await openSource(sourceUrl, signal, referer);
+    const res = await openSource(sourceUrl, signal, referer).catch((e: unknown) => {
+      // "fetch failed" says nothing: name the video server and the reason (name not found, refused, timed out)
+      const cause = (e as { cause?: { code?: string } })?.cause?.code;
+      let host = "the video server";
+      try {
+        host = new URL(sourceUrl).host;
+      } catch {
+        /* keep the generic name */
+      }
+      if (cause === "ENOTFOUND") throw new Error(`The video server ${host} does not exist any more (its name cannot be found)`);
+      if (cause) throw new Error(`The video server ${host} could not be reached (${cause})`);
+      throw e;
+    });
     if (!res.ok || !res.body) throw new Error(`The source answered HTTP ${res.status}`);
     const type = (res.headers.get("content-type") || "").toLowerCase();
     if (type.startsWith("text/") || type.includes("json")) throw new Error(`The source returned ${type}, not a video`);
