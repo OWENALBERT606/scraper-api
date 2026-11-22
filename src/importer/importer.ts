@@ -1,7 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
-import { baseKey, fetchDashboard, fetchMovieDetail, searchContent, seasonEpisode, seriesBase, FWMovieDetail } from "../scrapers/freewatch";
+import { baseKey, searchContent, seasonEpisode, seriesBase } from "../scrapers/freewatch";
+import { freewatchSource, Source, SourceDetail } from "./sources";
 import { B2Store } from "./b2";
 import { b2ObjectUrl, ImportConfig, loadImportConfig } from "./config";
 import {
@@ -22,7 +23,7 @@ import { Platform, PlatformError } from "./platform";
 export type ItemStatus = "queued" | "checking" | "ready" | "downloading" | "saving" | "imported" | "skipped" | "failed";
 
 export interface ImportItem {
-  sourceId: number;
+  sourceId: string;
   title: string;
   vj: string;
   status: ItemStatus;
@@ -41,12 +42,15 @@ export interface RunOptions {
   /** stop after this many films have been imported (or, in a dry run, would be) */
   limit?: number;
   /** only these FreeWatch ids */
-  ids?: number[];
+  ids?: (string | number)[];
   /** forget earlier failures so those films are tried again (films already imported are still skipped) */
   retryFailed?: boolean;
 }
 
 export interface ImportStatus {
+  /** which site is being copied from */
+  source: string;
+  sourceLabel: string;
   configured: boolean;
   missing: string[];
   running: boolean;
@@ -73,28 +77,12 @@ interface SeriesState {
 }
 
 const MAX_ATTEMPTS = 3;
-const GENRE_BY_SECTION: Record<string, string> = {
-  action: "Action",
-  "sci fi": "Science Fiction",
-  romance: "Romance",
-  horror: "Horror",
-  drama: "Drama",
-  comedy: "Comedy",
-  thriller: "Thriller",
-  animation: "Animation",
-  crime: "Crime",
-  adventure: "Adventure",
-  fantasy: "Fantasy",
-  war: "War",
-  documentary: "Documentary",
-};
-
 export class Importer {
   private cfg: ImportConfig;
   private missing: string[];
   private platform: Platform;
   private store: B2Store;
-  private items = new Map<number, ImportItem>();
+  private items = new Map<string, ImportItem>();
   private seriesCache = new Map<string, Promise<SeriesState>>();
   private running = false;
   private stopRequested = false;
@@ -104,10 +92,13 @@ export class Importer {
   private message = "Idle";
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(env: NodeJS.ProcessEnv = process.env, deps?: { platform?: Platform; store?: B2Store }) {
+  private source: Source;
+
+  constructor(env: NodeJS.ProcessEnv = process.env, deps?: { platform?: Platform; store?: B2Store; source?: Source }) {
     const { config, missing } = loadImportConfig(env);
+    this.source = deps?.source ?? freewatchSource();
     this.cfg = config;
-    this.missing = missing;
+    this.missing = [...missing, ...this.source.missing()];
     this.platform = deps?.platform ?? new Platform(config);
     this.store = deps?.store ?? new B2Store(config);
   }
@@ -121,6 +112,8 @@ export class Importer {
     const items = Array.from(this.items.values());
     for (const i of items) counts[i.status]++;
     return {
+      source: this.source.name,
+      sourceLabel: this.source.label,
       configured: this.isConfigured(),
       missing: this.missing,
       running: this.running,
@@ -164,7 +157,7 @@ export class Importer {
   // ── ledger: which source films were already handled, so a re-run never repeats work ───────────────────────────
 
   private ledgerPath(): string {
-    return path.join(this.cfg.dataDir, "import-ledger.json");
+    return path.join(this.cfg.dataDir, this.source.name === "freewatch" ? "import-ledger.json" : `import-ledger-${this.source.name}.json`);
   }
 
   private async readLedger(): Promise<Ledger> {
@@ -185,31 +178,8 @@ export class Importer {
 
   // ── finding what the source has ─────────────────────────────────────────────────────────────────────────────
 
-  /** Ids of everything that could be a film: the home page plus a search over letters and digits. */
-  private async discover(): Promise<{ ids: number[]; groupSize: Map<number, number> }> {
-    const ids = new Set<number>();
-    const groupSize = new Map<number, number>();
-    try {
-      for (const m of (await fetchDashboard()).movies) ids.add(Number(m.id));
-    } catch (e) {
-      this.message = `The home page could not be read (${e instanceof Error ? e.message : e}); using search only`;
-    }
-    const terms = [..."abcdefghijklmnopqrstuvwxyz0123456789", ...(process.env.IMPORT_SEARCH_TERMS ?? "").split(",").map((t) => t.trim()).filter(Boolean)];
-    for (let i = 0; i < terms.length; i += 4) {
-      const batch = terms.slice(i, i + 4);
-      const results = await Promise.allSettled(batch.map((t) => searchContent(t)));
-      for (const r of results) {
-        if (r.status !== "fulfilled") continue;
-        for (const m of r.value.movies ?? []) ids.add(Number(m.id));
-        for (const s of r.value.series ?? []) {
-          for (const ep of s.episodes ?? []) {
-            ids.add(Number(ep.id));
-            groupSize.set(Number(ep.id), Math.max(groupSize.get(Number(ep.id)) ?? 0, s.episodes.length));
-          }
-        }
-      }
-    }
-    return { ids: [...ids].filter((n) => Number.isFinite(n) && n > 0), groupSize };
+  private discover(): Promise<{ ids: string[]; groupSize: Map<string, number> }> {
+    return this.source.discover((m) => (this.message = m));
   }
 
   // ── the run ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -235,18 +205,18 @@ export class Importer {
         ledger.failed = {};
         await this.writeLedger(ledger);
       }
-      const found = opts.ids?.length ? { ids: opts.ids, groupSize: new Map<number, number>() } : await this.discover();
-      if (this.cfg.series && !opts.ids?.length && !this.stopRequested) {
+      const found = opts.ids?.length ? { ids: opts.ids.map(String), groupSize: new Map<string, number>() } : await this.discover();
+      if (this.source.name === "freewatch" && this.cfg.series && !opts.ids?.length && !this.stopRequested) {
         // series already on the platform: look for episodes the source has that the platform does not
         const missing = await this.missingEpisodes();
         const all = new Set(found.ids);
-        for (const id of missing) {
+        for (const id of missing.map(String)) {
           all.add(id);
           found.groupSize.set(id, Math.max(found.groupSize.get(id) ?? 0, 2));
         }
         found.ids = [...all];
       }
-      const fresh = found.ids.filter((id) => !ledger.imported[String(id)] && (ledger.failed[String(id)]?.attempts ?? 0) < MAX_ATTEMPTS);
+      const fresh = found.ids.filter((id) => !ledger.imported[id] && (ledger.failed[id]?.attempts ?? 0) < MAX_ATTEMPTS);
       this.message = `${found.ids.length} titles found, ${found.ids.length - fresh.length} already handled earlier. Checking the rest…`;
 
       const sections = await this.sectionGenres();
@@ -325,28 +295,19 @@ export class Importer {
     return ids;
   }
 
-  /** category id -> genre name, from the source's own home-page sections (only the ones that are genres). */
-  private async sectionGenres(): Promise<Map<number, string>> {
-    const map = new Map<number, string>();
-    try {
-      for (const s of (await fetchDashboard()).sections) {
-        const g = GENRE_BY_SECTION[normalizeTitle(s.category)];
-        if (g) map.set(s.id, g);
-      }
-    } catch {
-      /* genres then come from the metadata match alone */
-    }
-    return map;
+  private sectionGenres(): Promise<Map<number, string>> {
+    return this.source.sections();
   }
 
-  private async processOne(sourceId: number, groupSize: number, sections: Map<number, string>, ledger: Ledger): Promise<void> {
+  private async processOne(sourceId: string, groupSize: number, sections: Map<number, string>, ledger: Ledger): Promise<void> {
     const item: ImportItem = { sourceId, title: `#${sourceId}`, vj: "", status: "checking", bytes: 0, total: 0, updatedAt: new Date().toISOString() };
     this.items.set(sourceId, item);
     const skip = (reason: string) => this.touch(item, { status: "skipped", reason });
     let uploadedKey: string | null = null;
 
     try {
-      const detail: FWMovieDetail = await fetchMovieDetail(sourceId);
+      const detail = await this.source.detail(sourceId);
+      if (!detail) return skip("The source no longer has it (or it has no video)");
       const { title, year } = cleanTitle(detail.title || "");
       this.touch(item, { title: title || item.title, vj: cleanVj(detail.vj) });
 
@@ -354,7 +315,7 @@ export class Importer {
       const url = detail.playingurl || "";
       if (!title) return skip("The source has no title for it");
       if (!url) return skip("The source has no video address");
-      if (!looksLikeFilm(detail.title || "", groupSize)) {
+      if (detail.episode || (!detail.isFilm && !looksLikeFilm(detail.title || "", groupSize))) {
         if (!this.cfg.series) return skip("It looks like a series episode, not a film (series import is off)");
         return await this.processEpisode(item, detail, ledger, sections, skip);
       }
@@ -374,7 +335,7 @@ export class Importer {
       if (this.cfg.skipAnyVj && first.existsAnyVj) return skip("Already on the platform (same title, any VJ)");
 
       // ── 3. metadata: the best match on TMDB (through the platform), else what the source gives ─────────────────
-      const hit = bestTmdbMatch(title, year, await this.platform.searchTmdb(title));
+      const hit = detail.tmdbId ? { tmdbId: detail.tmdbId, title, year: null } : bestTmdbMatch(title, year, await this.platform.searchTmdb(title));
       const meta = hit?.tmdbId ? await this.platform.enrich(hit.tmdbId) : null;
       this.touch(item, { tmdbMatched: !!meta });
       const officialTitle = String(meta?.title || title).trim();
@@ -396,13 +357,13 @@ export class Importer {
       const vjRow = vj ?? (await this.platform.ensureVj(vjName));
       let genreId = (meta?.genreId as string | null) || "";
       if (!genreId) {
-        const name = sections.get(Number(detail.category_id));
+        const name = detail.genreName || sections.get(Number(detail.category_id));
         if (name) genreId = (await this.platform.ensureGenre(name)).id;
       }
       if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no metadata match and an unknown category)");
       let yearId = (meta?.yearId as string | null) || "";
       if (!yearId) {
-        const y = year ?? (detail.timestamp ? new Date(detail.timestamp.replace(" ", "T") + "Z").getUTCFullYear() : new Date().getUTCFullYear());
+        const y = year ?? detail.year ?? (detail.timestamp ? new Date(detail.timestamp.replace(" ", "T") + "Z").getUTCFullYear() : new Date().getUTCFullYear());
         yearId = (await this.platform.ensureYear(y)).id;
       }
 
@@ -413,7 +374,7 @@ export class Importer {
         this.touch(item, { status: "downloading", reason: undefined });
         const key = `${randomUUID()}-${safeKeyPart(officialTitle)} ${safeKeyPart(vjName)}.${ext || "mp4"}`;
         uploadedKey = key;
-        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }));
+        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }), undefined, this.source.referer);
         videoUrl = b2ObjectUrl(this.cfg.b2, key.split("/").map(encodeURIComponent).join("/"));
         sizeBytes = copied.bytes;
       }
@@ -475,16 +436,18 @@ export class Importer {
 
   private async processEpisode(
     item: ImportItem,
-    detail: FWMovieDetail,
+    detail: SourceDetail,
     ledger: Ledger,
     sections: Map<number, string>,
     skip: (reason: string) => void
   ): Promise<void> {
     const sourceId = item.sourceId;
     const raw = detail.title || "";
-    const parsed = cleanTitle(seriesBase(raw));
+    const given = detail.episode;
+    const parsed = given ? { title: given.base, year: detail.year ?? null } : cleanTitle(seriesBase(raw));
     const base = parsed.title || seriesBase(raw);
-    const [seasonRead, episode] = seasonEpisode(raw);
+    const [seasonRead, episodeRead] = given ? [given.season, given.episode] : seasonEpisode(raw);
+    const episode = episodeRead;
     const season = seasonRead || 1;
     if (!base) return skip("The series name could not be read from the title");
     if (!episode) return skip("The episode number could not be read from the title");
@@ -517,13 +480,13 @@ export class Importer {
       // the series and the season exist before the video is copied (made one at a time per series)
       const seasonId = await this.exclusive(state, async () => {
         if (!state.id) {
-          const hit = bestTmdbMatch(base, parsed.year, await this.platform.searchTmdbSeries(base));
+          const hit = detail.tmdbId ? { tmdbId: detail.tmdbId, title: base, year: null } : bestTmdbMatch(base, parsed.year, await this.platform.searchTmdbSeries(base));
           const meta = hit?.tmdbId ? await this.platform.enrichSeries(hit.tmdbId) : null;
           state.tmdbId = hit?.tmdbId ?? null;
           const vjRow = vj ?? (await this.platform.ensureVj(vjName));
           let genreId = (meta?.genreId as string | null) || "";
           if (!genreId) {
-            const name = sections.get(Number(detail.category_id));
+            const name = detail.genreName || sections.get(Number(detail.category_id));
             if (name) genreId = (await this.platform.ensureGenre(name)).id;
           }
           if (!genreId) throw new Error("No genre could be decided for the series (no metadata match and an unknown category)");
@@ -571,7 +534,7 @@ export class Importer {
         this.touch(item, { status: "downloading", reason: undefined });
         const key = `${randomUUID()}-${safeKeyPart(base)} S${season}E${episode} ${safeKeyPart(vjName)}.${ext || "mp4"}`;
         uploadedKey = key;
-        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }));
+        const copied = await this.store.copy(url, key, (bytes, total) => this.touch(item, { bytes, total }), undefined, this.source.referer);
         videoUrl = b2ObjectUrl(this.cfg.b2, key.split("/").map(encodeURIComponent).join("/"));
         sizeBytes = copied.bytes;
       }
@@ -582,8 +545,8 @@ export class Importer {
       const lengthSeconds = Number(ep?.lengthSeconds) || durationToSeconds(detail.duration);
       const created = await this.platform.createEpisode(seasonId, {
         episodeNumber: episode,
-        title: String(ep?.title || `Episode ${episode}`),
-        description: String(ep?.description || ""),
+        title: String(ep?.title || (given?.title && !/^(episode|ep\.?)\s*\d+$/i.test(given.title.trim()) ? given.title : "") || `Episode ${episode}`),
+        description: String(ep?.description || given?.overview || ""),
         videoUrl,
         poster: String(ep?.poster || detail.image || ""),
         length: String(ep?.length || secondsToLength(lengthSeconds)),
@@ -615,7 +578,7 @@ export class Importer {
     return run;
   }
 
-  private async fail(item: ImportItem, ledger: Ledger, sourceId: number, reason: string): Promise<void> {
+  private async fail(item: ImportItem, ledger: Ledger, sourceId: string, reason: string): Promise<void> {
     if (this.dryRun) return void this.touch(item, { status: "failed", reason }); // a dry run leaves no trace in the ledger
     const attempts = (ledger.failed[String(sourceId)]?.attempts ?? 0) + 1;
     ledger.failed[String(sourceId)] = { attempts, reason, at: new Date().toISOString() };

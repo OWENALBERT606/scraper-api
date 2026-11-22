@@ -4,7 +4,7 @@ import path from "path";
 import routes from "./routes";
 import proxyRouter from "./proxy";
 import { startUploadScheduler } from "./uploader";
-import { importer } from "./importer";
+import { startAllAutoruns } from "./importer";
 
 const app  = express();
 const PORT = process.env.PORT ?? 3000;
@@ -48,7 +48,7 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 startUploadScheduler();
-importer.startAutorun(); // only when IMPORT_AUTORUN_MINUTES is set and the importer is configured
+startAllAutoruns(); // only when IMPORT_AUTORUN_MINUTES is set and the importer is configured
 
 app.listen(PORT, () => {
   console.log(`\nScraper API → http://localhost:${PORT}`);

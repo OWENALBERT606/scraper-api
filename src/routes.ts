@@ -18,7 +18,7 @@ import {
   clearMlegacytvCache,
 } from "./scrapers/mlegacytv";
 import { proxyBase, proxyUrl } from "./proxy";
-import { importer } from "./importer";
+import { importerFor } from "./importer";
 import {
   drainUploadQueue,
   enqueueUploads,
@@ -420,29 +420,41 @@ router.use("/import", (req: Request, res: Response, next) => {
   res.status(403).json({ error: "Set IMPORT_API_KEY on the server to use the import routes remotely" });
 });
 
+// Every import route takes ?source=freewatch (default) or ?source=mlegacytv
+function pickImporter(req: Request, res: Response) {
+  const imp = importerFor(req.query.source);
+  if (!imp) res.status(400).json({ error: "Unknown source (use freewatch or mlegacytv)" });
+  return imp;
+}
+
 // ── GET /import/status ────────────────────────────────────────────────────────
-router.get("/import/status", (_req: Request, res: Response) => {
-  res.json({ success: true, data: importer.status() });
+router.get("/import/status", (req: Request, res: Response) => {
+  const imp = pickImporter(req, res);
+  if (imp) res.json({ success: true, data: imp.status() });
 });
 
-// ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: number[] } ──
+// ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: (number|string)[] } ──
 // Starts in the background and answers at once. Use dryRun first: it only reports what would be imported or skipped.
 router.post("/import/start", (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: number[]; retryFailed?: boolean };
-  const r = importer.start({
+  const imp = pickImporter(req, res);
+  if (!imp) return;
+  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: (number | string)[]; retryFailed?: boolean };
+  const r = imp.start({
     dryRun: body.dryRun === true,
     retryFailed: body.retryFailed === true,
     limit: typeof body.limit === "number" ? body.limit : undefined,
-    ids: Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined,
+    ids: Array.isArray(body.ids) ? body.ids.filter((x) => (typeof x === "number" && Number.isFinite(x)) || (typeof x === "string" && x.trim())) : undefined,
   });
   if (!r.started) { res.status(409).json({ error: r.reason }); return; }
-  res.json({ success: true, data: importer.status() });
+  res.json({ success: true, data: imp.status() });
 });
 
 // ── POST /import/stop ─────────────────────────────────────────────────────────
-router.post("/import/stop", (_req: Request, res: Response) => {
-  importer.stop();
-  res.json({ success: true, data: importer.status() });
+router.post("/import/stop", (req: Request, res: Response) => {
+  const imp = pickImporter(req, res);
+  if (!imp) return;
+  imp.stop();
+  res.json({ success: true, data: imp.status() });
 });
 
 export default router;
