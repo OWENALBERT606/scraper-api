@@ -29,17 +29,12 @@ export function mediaForId(id: string, source: Source["name"]): Exclude<ImportMe
   return "movies";
 }
 
-/** Movies are discovered first at MlegacyTV; alternate them with episodes so one does not starve the other. */
-export function interleaveMlegacyIds(ids: string[]): string[] {
+/** Movies are migrated first at MlegacyTV; series episodes are pushed to the back of the queue. */
+export function orderMlegacyIds(ids: string[]): string[] {
   const movies: string[] = [];
   const series: string[] = [];
   for (const id of ids) (mediaForId(id, "mlegacytv") === "series" ? series : movies).push(id);
-  const out: string[] = [];
-  for (let m = 0, s = 0; m < movies.length || s < series.length; ) {
-    if (m < movies.length) out.push(movies[m++]);
-    if (s < series.length) out.push(series[s++]);
-  }
-  return out;
+  return [...movies, ...series];
 }
 
 export interface ImportItem {
@@ -245,7 +240,7 @@ export class Importer {
         found.ids = [...all];
       }
       if (this.source.name === "mlegacytv") {
-        found.ids = this.media === "all" ? interleaveMlegacyIds(found.ids) : found.ids.filter((id) => mediaForId(id, this.source.name) === this.media);
+        found.ids = this.media === "all" ? orderMlegacyIds(found.ids) : found.ids.filter((id) => mediaForId(id, this.source.name) === this.media);
       }
       const fresh = found.ids.filter((id) => !ledger.imported[id] && (ledger.failed[id]?.attempts ?? 0) < MAX_ATTEMPTS);
       const scope = this.media === "series" ? "series episodes" : this.media === "movies" ? "films" : "titles";

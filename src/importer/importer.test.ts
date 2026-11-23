@@ -4,7 +4,7 @@ import { bestTmdbMatch, bytesToSize, cleanTitle, cleanVj, durationToSeconds, ext
 import { b2ObjectUrl, loadImportConfig } from "./config";
 import { Platform } from "./platform";
 import { B2Store } from "./b2";
-import { Importer, interleaveMlegacyIds, mediaForId } from "./importer";
+import { Importer, mediaForId, orderMlegacyIds } from "./importer";
 import type { Source } from "./sources";
 
 test("titles normalise to one form", () => {
@@ -159,13 +159,13 @@ test("Mlegacy ids identify films and series episodes", () => {
   assert.equal(mediaForId("s:123", "mlegacytv"), "series");
 });
 
-test("Mlegacy films and episodes alternate in an all-media run", () => {
+test("Mlegacy films are queued before series episodes in an all-media run", () => {
   assert.deepEqual(
-    interleaveMlegacyIds(["m:1", "m:2", "m:3", "e:1", "e:2"]),
-    ["m:1", "e:1", "m:2", "e:2", "m:3"]
+    orderMlegacyIds(["e:1", "m:1", "e:2", "m:2", "m:3"]),
+    ["m:1", "m:2", "m:3", "e:1", "e:2"]
   );
-  assert.deepEqual(interleaveMlegacyIds(["e:1", "e:2"]), ["e:1", "e:2"]);
-  assert.deepEqual(interleaveMlegacyIds([]), []);
+  assert.deepEqual(orderMlegacyIds(["e:1", "e:2"]), ["e:1", "e:2"]);
+  assert.deepEqual(orderMlegacyIds([]), []);
 });
 
 function mediaImporter(id: string, detail: { title: string; playingurl: string; isFilm?: boolean; episode?: { base: string; season: number; episode: number } }): Importer {
