@@ -1,5 +1,9 @@
-const SUPABASE_URL = process.env.MLEGACYTV_SUPABASE_URL ?? "";
-const SUPABASE_KEY = process.env.MLEGACYTV_SUPABASE_KEY ?? "";
+function env(name: string): string {
+  return (process.env[name] ?? "").trim().replace(/^(["'])(.*)\1$/, "$2").trim();
+}
+
+const SUPABASE_URL = env("MLEGACYTV_SUPABASE_URL");
+const SUPABASE_KEY = env("MLEGACYTV_SUPABASE_KEY");
 const REST_URL = `${SUPABASE_URL}/rest/v1`;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
@@ -17,8 +21,8 @@ const HEADERS: Record<string, string> = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
 };
 
-const ACCOUNT_EMAIL = process.env.MLEGACYTV_EMAIL ?? "";
-const ACCOUNT_PASSWORD = process.env.MLEGACYTV_PASSWORD ?? "";
+const ACCOUNT_EMAIL = env("MLEGACYTV_EMAIL");
+const ACCOUNT_PASSWORD = env("MLEGACYTV_PASSWORD");
 const PLAYBACK_API = "https://mlegacytv.com/api/playback-url";
 
 interface Session {
@@ -54,7 +58,10 @@ async function accessToken(fetchImpl: typeof fetch = fetch): Promise<string> {
       signal: AbortSignal.timeout(30_000),
     });
     const json = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; msg?: string };
-    if (!res.ok || !json.access_token) throw new Error(`MlegacyTV sign-in failed (${res.status}): ${json.msg ?? "invalid credentials"}`);
+    if (!res.ok || !json.access_token) {
+      const email = ACCOUNT_EMAIL || "(not set)";
+      throw new Error(`MlegacyTV sign-in failed (${res.status}): ${json.msg ?? "invalid credentials"} — check MLEGACYTV_EMAIL (${email}) / MLEGACYTV_PASSWORD`);
+    }
     session.token = json.access_token;
     session.expiresAt = Date.now() + Math.max(60, (Number(json.expires_in) || 3600) - 60) * 1000;
     return session.token;
