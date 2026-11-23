@@ -121,20 +121,65 @@ export interface TmdbHit {
   year: string | number | null;
 }
 
-/**
- * Picks the TMDB result that really is this film: the same normalised title, and, when we know the year, the same year
- * (one year either side is allowed). Returns null rather than guessing, so a wrong film's poster and cast never end up
- * on the wrong title.
- */
-export function bestTmdbMatch(title: string, year: number | null, hits: TmdbHit[]): TmdbHit | null {
-  const want = normalizeTitle(title);
-  const exact = hits.filter((h) => h.tmdbId && normalizeTitle(h.title) === want);
-  if (exact.length === 0) return null;
-  if (year) {
-    const sameYear = exact.find((h) => Math.abs(Number(h.year) - year) <= 1);
-    if (sameYear) return sameYear;
-    // the year we have came from a source that can be wrong: only accept an exact title when there is a single candidate
-    return exact.length === 1 ? exact[0] : null;
+export interface ImdbHit extends TmdbHit {
+  imdbId?: string | null;
+}
+
+const FUZZY_TITLE_THRESHOLD = 0.82;
+
+function bigrams(s: string): Set<string> {
+  const out = new Set<string>();
+  if (!s) return out;
+  if (s.length === 1) {
+    out.add(s);
+    return out;
   }
-  return exact[0];
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+  return out;
+}
+
+function overlapScore(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const value of a) if (b.has(value)) shared++;
+  return (2 * shared) / (a.size + b.size);
+}
+
+function titleSimilarity(a: string, b: string): number {
+  const left = normalizeTitle(a);
+  const right = normalizeTitle(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  const chars = overlapScore(bigrams(left), bigrams(right));
+  const words = overlapScore(new Set(left.split(" ").filter(Boolean)), new Set(right.split(" ").filter(Boolean)));
+  return Math.max(chars, words);
+}
+
+function closeYear(hit: TmdbHit, year: number | null): boolean {
+  return !!year && hit.year != null && Math.abs(Number(hit.year) - year) <= 1;
+}
+
+function bestHit<T extends TmdbHit>(title: string, year: number | null, hits: T[], hasId: (hit: T) => boolean): T | null {
+  const usable = hits.filter((h) => hasId(h) && normalizeTitle(h.title));
+  const exact = usable.filter((h) => normalizeTitle(h.title) === normalizeTitle(title));
+  if (exact.length) {
+    if (!year) return exact[0];
+    return exact.find((h) => closeYear(h, year)) ?? (exact.length === 1 ? exact[0] : null);
+  }
+  const fuzzy = usable
+    .map((hit) => ({ hit, score: titleSimilarity(title, hit.title) }))
+    .filter((x) => x.score >= FUZZY_TITLE_THRESHOLD)
+    .sort((a, b) => b.score - a.score)
+    .map((x) => x.hit);
+  if (!fuzzy.length) return null;
+  if (year) return fuzzy.find((h) => closeYear(h, year)) ?? null;
+  return fuzzy.length === 1 ? fuzzy[0] : null;
+}
+
+export function bestTmdbMatch(title: string, year: number | null, hits: TmdbHit[]): TmdbHit | null {
+  return bestHit(title, year, hits, (h) => !!h.tmdbId);
+}
+
+export function bestImdbMatch(title: string, year: number | null, hits: ImdbHit[]): ImdbHit | null {
+  return bestHit(title, year, hits, (h) => !!h.imdbId);
 }

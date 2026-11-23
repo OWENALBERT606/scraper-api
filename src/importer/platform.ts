@@ -159,7 +159,14 @@ export class Platform {
 
   async findGenre(name: string): Promise<NamedRow | null> {
     const want = normalizeTitle(name);
-    const aliases: Record<string, string> = { "sci fi": "science fiction", scifi: "science fiction", "action and adventure": "action" };
+    const aliases: Record<string, string> = {
+      "sci fi": "science fiction",
+      scifi: "science fiction",
+      "action and adventure": "action",
+      "action adventure": "action",
+      kids: "family",
+      biopic: "biography",
+    };
     const target = aliases[want] ?? want;
     return (await this.loadGenres()).find((g) => normalizeTitle(g.name) === target) ?? null;
   }

@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bestTmdbMatch, bytesToSize, cleanTitle, cleanVj, durationToSeconds, extensionOf, looksLikeFilm, normalizeTitle, safeKeyPart, secondsToLength, sizeToBytes } from "./parse";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+import { randomUUID } from "crypto";
+import { bestImdbMatch, bestTmdbMatch, bytesToSize, cleanTitle, cleanVj, durationToSeconds, extensionOf, looksLikeFilm, normalizeTitle, safeKeyPart, secondsToLength, sizeToBytes } from "./parse";
 import { b2ObjectUrl, loadImportConfig } from "./config";
 import { Platform } from "./platform";
 import { B2Store } from "./b2";
 import { Importer, mediaForId, orderMlegacyIds } from "./importer";
+import { genreOverrideFor, mergeGenreOverrides, parseGenreOverrides } from "./overrides";
 import type { Source } from "./sources";
 
 test("titles normalise to one form", () => {
@@ -63,6 +68,33 @@ test("TMDB match needs the same title and a close year", () => {
   assert.equal(bestTmdbMatch("Hope", 2000, hits), null); // two candidates, none near the year
   assert.equal(bestTmdbMatch("Nothing", null, hits), null);
   assert.equal(bestTmdbMatch("Hope Springs", null, hits)?.tmdbId, 3);
+});
+
+test("metadata matches tolerate spelling variants but still refuse guesses", () => {
+  const hits = [
+    { tmdbId: 1, title: "Spiderman - No Way Home", year: 2021, imdbId: "tt1" },
+    { tmdbId: 2, title: "Hope Springs", year: 2021, imdbId: null },
+  ];
+  assert.equal(bestTmdbMatch("Spider Man No Way Home", 2021, hits)?.tmdbId, 1);
+  assert.equal(bestTmdbMatch("Spider Man No Way Home", 1999, hits), null);
+  assert.equal(bestImdbMatch("Spider Man No Way Home", 2021, hits)?.imdbId, "tt1");
+  const ambiguous = [
+    { tmdbId: 1, title: "Spiderman No Way Home", year: 2021, imdbId: "tt1" },
+    { tmdbId: 2, title: "Spiderman No Way Home 2", year: 2021, imdbId: "tt2" },
+  ];
+  assert.equal(bestTmdbMatch("Spider Man No Way Home", null, ambiguous), null);
+});
+
+test("genre overrides accept ids and titles in either shape", () => {
+  const structured = parseGenreOverrides('{"ids":{"freewatch:1":"Drama"},"titles":{"The Weird Film!":"Horror"}}');
+  assert.equal(genreOverrideFor(structured, "freewatch", "1", []), "Drama");
+  assert.equal(genreOverrideFor(structured, "freewatch", "2", ["Weird Film"]), "Horror");
+  assert.equal(genreOverrideFor(structured, "freewatch", "2", ["Something Else"]), null);
+  const flat = parseGenreOverrides('{"2":"Action","film name":"Comedy"}');
+  assert.equal(genreOverrideFor(flat, "mlegacytv", "2", []), "Action");
+  assert.equal(genreOverrideFor(flat, "mlegacytv", "9", ["Film: Name"]), "Comedy");
+  assert.equal(genreOverrideFor(mergeGenreOverrides(structured, flat), "freewatch", "2", []), "Action");
+  assert.throws(() => parseGenreOverrides("{"), /valid JSON/);
 });
 
 test("config reports what is missing and never throws", () => {
@@ -198,4 +230,77 @@ test("a movies-only run skips series episodes", async () => {
   }).run({ dryRun: true, media: "movies" });
   assert.equal(result.counts.skipped, 1);
   assert.match(result.items[0]?.reason ?? "", /movies-only/);
+});
+
+function genreOverrideImporter(dataDir: string, inline?: string) {
+  const genres: string[] = [];
+  let payload: Record<string, unknown> | null = null;
+  const source: Source = {
+    name: "freewatch",
+    label: "Test",
+    referer: "",
+    missing: () => [],
+    discover: async () => ({ ids: ["42"], groupSize: new Map() }),
+    detail: async () => ({
+      title: "Strange Upload (2020)",
+      playingurl: "https://x.test/strange.mp4",
+      vj: "Emmy",
+      isFilm: true,
+      category_id: 999,
+    }),
+    sections: async () => new Map(),
+  };
+  const platform = {
+    signIn: async () => undefined,
+    findVj: async () => ({ id: "v1", name: "VJ Emmy" }),
+    checkTitle: async () => ({ duplicate: false, existsAnyVj: false }),
+    searchTmdb: async () => [],
+    enrich: async () => null,
+    ensureGenre: async (name: string) => {
+      genres.push(name);
+      return { id: `g:${name}`, name };
+    },
+    ensureYear: async () => ({ id: "y1", value: 2020 }),
+    createMovie: async (body: Record<string, unknown>) => {
+      payload = body;
+      return { id: "m1", title: String(body.title) };
+    },
+  } as unknown as Platform;
+  const env: NodeJS.ProcessEnv = {
+    PLATFORM_API_URL: "http://x.test/api/v1",
+    PLATFORM_EMAIL: "a@b.c",
+    PLATFORM_PASSWORD: "pw",
+    IMPORT_DATA_DIR: dataDir,
+    ...(inline ? { IMPORT_GENRE_OVERRIDES: inline } : {}),
+  };
+  return { importer: new Importer(env, { platform, store: {} as B2Store, source }), genres, payload: () => payload };
+}
+
+test("an inline genre override rescues a film with no metadata genre", async () => {
+  const dir = path.join(os.tmpdir(), `movie-champ-genre-${randomUUID()}`);
+  const { importer, genres, payload } = genreOverrideImporter(dir, '{"42":"Drama"}');
+  try {
+    const result = await importer.run({ ids: ["42"] });
+    assert.equal(result.counts.imported, 1);
+    assert.equal(result.counts.failed, 0);
+    assert.deepEqual(genres, ["Drama"]);
+    assert.deepEqual(payload()?.genreIds, ["g:Drama"]);
+    assert.match(result.items[0]?.reason ?? "", /manual genre override/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a genre-overrides.json file in the data directory is used", async () => {
+  const dir = path.join(os.tmpdir(), `movie-champ-genre-${randomUUID()}`);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, "genre-overrides.json"), JSON.stringify({ titles: { "Strange Upload": "Horror" } }));
+  const { importer, genres } = genreOverrideImporter(dir);
+  try {
+    const result = await importer.run({ ids: ["42"] });
+    assert.equal(result.counts.imported, 1);
+    assert.deepEqual(genres, ["Horror"]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

@@ -6,6 +6,7 @@ import { freewatchSource, Source, SourceDetail } from "./sources";
 import { B2Store } from "./b2";
 import { b2ObjectUrl, ImportConfig, loadImportConfig } from "./config";
 import {
+  bestImdbMatch,
   bestTmdbMatch,
   bytesToSize,
   cleanTitle,
@@ -19,6 +20,7 @@ import {
   sizeToBytes,
 } from "./parse";
 import { Platform, PlatformError } from "./platform";
+import { GenreOverrides, emptyGenreOverrides, genreOverrideFor, mergeGenreOverrides, parseGenreOverrides } from "./overrides";
 
 export type ItemStatus = "queued" | "checking" | "ready" | "downloading" | "saving" | "imported" | "skipped" | "failed";
 export type ImportMedia = "all" | "movies" | "series";
@@ -97,6 +99,7 @@ interface SeriesState {
 const MAX_ATTEMPTS = 3;
 export class Importer {
   private cfg: ImportConfig;
+  private env: NodeJS.ProcessEnv;
   private missing: string[];
   private platform: Platform;
   private store: B2Store;
@@ -117,6 +120,7 @@ export class Importer {
     const { config, missing } = loadImportConfig(env);
     this.source = deps?.source ?? freewatchSource();
     this.cfg = config;
+    this.env = env;
     this.missing = [...missing, ...this.source.missing()];
     this.platform = deps?.platform ?? new Platform(config);
     this.store = deps?.store ?? new B2Store(config);
@@ -196,6 +200,15 @@ export class Importer {
     await fs.rename(tmp, this.ledgerPath());
   }
 
+  private async loadGenreOverrides(): Promise<GenreOverrides> {
+    const file = path.join(this.cfg.dataDir, "genre-overrides.json");
+    const raw = await fs.readFile(file, "utf8").catch(() => "");
+    return mergeGenreOverrides(
+      parseGenreOverrides(raw, file),
+      parseGenreOverrides(this.env.IMPORT_GENRE_OVERRIDES, "IMPORT_GENRE_OVERRIDES")
+    );
+  }
+
   // ── finding what the source has ─────────────────────────────────────────────────────────────────────────────
 
   private discover(): Promise<{ ids: string[]; groupSize: Map<string, number> }> {
@@ -247,6 +260,7 @@ export class Importer {
       this.message = `${found.ids.length} ${scope} found, ${found.ids.length - fresh.length} already handled earlier. Checking the rest…`;
 
       const sections = await this.sectionGenres();
+      const genreOverrides = await this.loadGenreOverrides();
       let done = 0;
       let next = 0;
       const limit = opts.limit && opts.limit > 0 ? opts.limit : Infinity;
@@ -256,7 +270,7 @@ export class Importer {
           if (id === undefined) return;
           const imported = [...this.items.values()].filter((i) => i.status === "imported" || i.status === "ready").length;
           if (imported >= limit) return;
-          await this.processOne(id, found.groupSize.get(id) ?? 1, sections, ledger).catch(() => undefined);
+          await this.processOne(id, found.groupSize.get(id) ?? 1, sections, genreOverrides, ledger).catch(() => undefined);
           done++;
           this.message = `${done} of ${fresh.length} checked`;
         }
@@ -326,7 +340,7 @@ export class Importer {
     return this.source.sections();
   }
 
-  private async processOne(sourceId: string, groupSize: number, sections: Map<number, string>, ledger: Ledger): Promise<void> {
+  private async processOne(sourceId: string, groupSize: number, sections: Map<number, string>, overrides: GenreOverrides, ledger: Ledger): Promise<void> {
     const item: ImportItem = { sourceId, title: `#${sourceId}`, vj: "", status: "checking", bytes: 0, total: 0, updatedAt: new Date().toISOString() };
     this.items.set(sourceId, item);
     const skip = (reason: string) => this.touch(item, { status: "skipped", reason });
@@ -347,7 +361,7 @@ export class Importer {
       if (this.media === "movies" && isEpisode) return skip("Episode skipped (movies-only run)");
       if (isEpisode) {
         if (!this.cfg.series) return skip("It looks like a series episode, not a film (series import is off)");
-        return await this.processEpisode(item, detail, ledger, sections, skip);
+        return await this.processEpisode(item, detail, ledger, sections, overrides, skip);
       }
       const ext = extensionOf(url);
       if (this.cfg.mode === "copy" && (ext === "m3u8" || ext === "mpd")) return skip("The video is a streaming playlist, not a file that can be copied");
@@ -385,23 +399,33 @@ export class Importer {
 
       // ── 4. everything the platform needs: VJ, genre, year ────────────────────────────────────────────────────────
       const vjRow = vj ?? (await this.platform.ensureVj(vjName));
-      let genreId = (meta?.genreId as string | null) || "";
+      let genreId = "";
+      let genreSource = "";
+      const overrideName = genreOverrideFor(overrides, this.source.name, sourceId, [title, officialTitle, detail.title]);
+      if (overrideName) {
+        genreId = (await this.platform.ensureGenre(overrideName)).id;
+        genreSource = "manual genre override";
+      }
+      if (!genreId && meta?.genreId) {
+        genreId = String(meta.genreId);
+        genreSource = "TMDB";
+      }
       if (!genreId) {
         const name = detail.genreName || sections.get(Number(detail.category_id));
-        if (name) genreId = (await this.platform.ensureGenre(name)).id;
+        if (name) {
+          genreId = (await this.platform.ensureGenre(name)).id;
+          genreSource = "source category";
+        }
       }
-      // last resort: the platform's OMDb / IMDb lookup (the same one the single-movie upload uses)
       let imdb: Record<string, unknown> | null = null;
       if (!genreId) {
-        const want = normalizeTitle(officialTitle);
         const y = year ?? detail.year ?? null;
-        const pick = (await this.platform.searchTmdb(officialTitle)).find(
-          (h) => h.imdbId && normalizeTitle(h.title) === want && (!y || !h.year || String(h.year).startsWith(String(y)))
-        );
+        const pick = bestImdbMatch(officialTitle, y, await this.platform.searchTmdb(officialTitle));
         imdb = pick?.imdbId ? await this.platform.enrichImdb(String(pick.imdbId)) : null;
         genreId = (imdb?.genreId as string | null) || "";
+        if (genreId) genreSource = "OMDb";
       }
-      if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no TMDB match, unknown category, and nothing on OMDb/IMDb)");
+      if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no TMDB match, unknown category, no override, and nothing on OMDb/IMDb)");
       let yearId = (meta?.yearId as string | null) || (imdb?.yearId as string | null) || "";
       if (!yearId) {
         const y = year ?? detail.year ?? (detail.timestamp ? new Date(detail.timestamp.replace(" ", "T") + "Z").getUTCFullYear() : new Date().getUTCFullYear());
@@ -450,7 +474,8 @@ export class Importer {
       ledger.imported[String(sourceId)] = { movieId: created.id, title: officialTitle, at: new Date().toISOString() };
       delete ledger.failed[String(sourceId)];
       await this.writeLedger(ledger);
-      this.touch(item, { status: "imported", movieId: created.id, title: officialTitle, reason: meta ? "Imported with TMDB metadata" : "Imported with the source's metadata" });
+      const detailNote = genreSource ? `; ${genreSource} genre` : "";
+      this.touch(item, { status: "imported", movieId: created.id, title: officialTitle, reason: (meta ? "Imported with TMDB metadata" : "Imported with the source's metadata") + detailNote });
     } catch (e) {
       if (uploadedKey) await this.store.remove(uploadedKey).catch(() => undefined); // never leave an orphaned file in the bucket
       if (e instanceof PlatformError && e.fatal) {
@@ -480,6 +505,7 @@ export class Importer {
     detail: SourceDetail,
     ledger: Ledger,
     sections: Map<number, string>,
+    overrides: GenreOverrides,
     skip: (reason: string) => void
   ): Promise<void> {
     const sourceId = item.sourceId;
@@ -538,12 +564,15 @@ export class Importer {
           const meta = hit?.tmdbId ? await this.platform.enrichSeries(hit.tmdbId) : null;
           state.tmdbId = hit?.tmdbId ?? null;
           const vjRow = vj ?? (await this.platform.ensureVj(vjName));
-          let genreId = (meta?.genreId as string | null) || "";
+          let genreId = "";
+          const overrideName = genreOverrideFor(overrides, this.source.name, sourceId, [base, raw, String(meta?.title ?? "")]);
+          if (overrideName) genreId = (await this.platform.ensureGenre(overrideName)).id;
+          if (!genreId && meta?.genreId) genreId = String(meta.genreId);
           if (!genreId) {
             const name = detail.genreName || sections.get(Number(detail.category_id));
             if (name) genreId = (await this.platform.ensureGenre(name)).id;
           }
-          if (!genreId) throw new Error("No genre could be decided for the series (no TMDB match and an unknown category)");
+          if (!genreId) throw new Error("No genre could be decided for the series (no TMDB match, unknown category, and no override)");
           let yearId = (meta?.yearId as string | null) || "";
           if (!yearId) yearId = (await this.platform.ensureYear(parsed.year ?? new Date().getUTCFullYear())).id;
           const poster = String(meta?.poster || detail.image || "");
