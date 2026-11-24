@@ -31,12 +31,12 @@ export function mediaForId(id: string, source: Source["name"]): Exclude<ImportMe
   return "movies";
 }
 
-/** Movies are migrated first at MlegacyTV; series episodes are pushed to the back of the queue. */
+/** Series episodes are migrated first at MlegacyTV; films are queued behind them. */
 export function orderMlegacyIds(ids: string[]): string[] {
   const movies: string[] = [];
   const series: string[] = [];
   for (const id of ids) (mediaForId(id, "mlegacytv") === "series" ? series : movies).push(id);
-  return [...movies, ...series];
+  return [...series, ...movies];
 }
 
 export interface ImportItem {
