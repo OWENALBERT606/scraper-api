@@ -21,54 +21,151 @@ const HEADERS: Record<string, string> = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
 };
 
-const ACCOUNT_EMAIL = env("MLEGACYTV_EMAIL");
-const ACCOUNT_PASSWORD = env("MLEGACYTV_PASSWORD");
-const PLAYBACK_API = "https://mlegacytv.com/api/playback-url";
+interface Account {
+  email: string;
+  password: string;
+  emailVar: string;
+  passwordVar: string;
+}
 
 interface Session {
   token: string;
   expiresAt: number;
+  rejectedUntil: number;
   pending?: Promise<string>;
 }
-const session: Session = { token: "", expiresAt: 0 };
+
+interface TokenResult {
+  token: string;
+  accountIndex: number;
+}
+
+const MAX_ACCOUNTS = 50;
+const ACCOUNT_COOLDOWN_MS = 10 * 60_000;
+const PLAYBACK_API = "https://mlegacytv.com/api/playback-url";
+
+function readAccounts(): Account[] {
+  const pairs: [string, string][] = [["MLEGACYTV_EMAIL", "MLEGACYTV_PASSWORD"]];
+  for (let i = 2; i <= MAX_ACCOUNTS; i++) pairs.push([`MLEGACYTV_EMAIL_${i}`, `MLEGACYTV_PASSWORD_${i}`]);
+  const list: Account[] = [];
+  for (const [emailVar, passwordVar] of pairs) {
+    const email = env(emailVar);
+    const password = env(passwordVar);
+    if (email || password) list.push({ email, password, emailVar, passwordVar });
+  }
+  return list;
+}
+
+const accounts = readAccounts();
+const sessions: Session[] = accounts.map(() => ({ token: "", expiresAt: 0, rejectedUntil: 0 }));
+let nextAccount = 0;
 const playbackCache = new Map<string, string>();
 const playbackPending = new Map<string, Promise<string>>();
 
 /** The catalogue's video_link values are stale; the site resolves them with a signed-in call to its playback API. */
 export function playbackCredentialsMissing(): string[] {
-  return [
-    ["MLEGACYTV_EMAIL", ACCOUNT_EMAIL],
-    ["MLEGACYTV_PASSWORD", ACCOUNT_PASSWORD],
-  ]
-    .filter(([, value]) => !value.trim())
-    .map(([name]) => name);
+  if (accounts.some((a) => a.email && a.password)) return [];
+  if (!accounts.length) return ["MLEGACYTV_EMAIL", "MLEGACYTV_PASSWORD"];
+  const missing = new Set<string>();
+  for (const a of accounts) {
+    if (!a.email) missing.add(a.emailVar);
+    if (!a.password) missing.add(a.passwordVar);
+  }
+  return [...missing];
 }
 
-async function accessToken(fetchImpl: typeof fetch = fetch): Promise<string> {
-  if (session.token && Date.now() < session.expiresAt) return session.token;
-  if (session.pending) return session.pending;
-  const missing = playbackCredentialsMissing();
-  if (missing.length) throw new Error(`MLEGACYTV_EMAIL / MLEGACYTV_PASSWORD are not set — cannot resolve MlegacyTV video links`);
+function errorOf(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
 
-  session.pending = (async () => {
-    const res = await fetchImpl(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
-      body: JSON.stringify({ email: ACCOUNT_EMAIL, password: ACCOUNT_PASSWORD }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    const json = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; msg?: string };
-    if (!res.ok || !json.access_token) {
-      const email = ACCOUNT_EMAIL || "(not set)";
-      throw new Error(`MlegacyTV sign-in failed (${res.status}): ${json.msg ?? "invalid credentials"} — check MLEGACYTV_EMAIL (${email}) / MLEGACYTV_PASSWORD`);
-    }
-    session.token = json.access_token;
-    session.expiresAt = Date.now() + Math.max(60, (Number(json.expires_in) || 3600) - 60) * 1000;
-    return session.token;
-  })().finally(() => {
-    session.pending = undefined;
+function rejectAccount(index: number): void {
+  const s = sessions[index];
+  s.token = "";
+  s.expiresAt = 0;
+  s.rejectedUntil = Date.now() + ACCOUNT_COOLDOWN_MS;
+}
+
+function usableAccounts(exclude: Set<number>): number[] {
+  const now = Date.now();
+  const order: number[] = [];
+  for (let n = 0; n < accounts.length; n++) {
+    const i = (nextAccount + n) % accounts.length;
+    const a = accounts[i];
+    const s = sessions[i];
+    if (!a.email || !a.password || exclude.has(i) || s.rejectedUntil > now) continue;
+    order.push(i);
+  }
+  return order;
+}
+
+async function signIn(index: number, fetchImpl: typeof fetch): Promise<string> {
+  const a = accounts[index];
+  const res = await fetchImpl(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
+    body: JSON.stringify({ email: a.email, password: a.password }),
+    signal: AbortSignal.timeout(30_000),
   });
-  return session.pending;
+  const json = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; msg?: string };
+  if (!res.ok || !json.access_token) {
+    throw new Error(`MlegacyTV sign-in failed (${res.status}): ${json.msg ?? "invalid credentials"} — check ${a.emailVar} (${a.email || "(not set)"}) / ${a.passwordVar}`);
+  }
+  const s = sessions[index];
+  s.token = json.access_token;
+  s.expiresAt = Date.now() + Math.max(60, (Number(json.expires_in) || 3600) - 60) * 1000;
+  s.rejectedUntil = 0;
+  return s.token;
+}
+
+async function accessToken(fetchImpl: typeof fetch = fetch, exclude: Set<number> = new Set()): Promise<TokenResult> {
+  const order = usableAccounts(exclude);
+  if (!order.length) {
+    const missing = playbackCredentialsMissing();
+    if (missing.length) throw new Error(`${missing.join(" / ")} are not set — cannot resolve MlegacyTV video links`);
+    throw new Error("All MlegacyTV accounts are temporarily unavailable — check MLEGACYTV_EMAIL* / MLEGACYTV_PASSWORD*");
+  }
+
+  for (const i of order) {
+    const s = sessions[i];
+    if (s.token && Date.now() < s.expiresAt) {
+      nextAccount = (i + 1) % accounts.length;
+      return { token: s.token, accountIndex: i };
+    }
+  }
+
+  let lastError: Error | null = null;
+  for (const i of order) {
+    const s = sessions[i];
+    if (s.pending) {
+      try {
+        const token = await s.pending;
+        nextAccount = (i + 1) % accounts.length;
+        return { token, accountIndex: i };
+      } catch (err) {
+        lastError = errorOf(err);
+        continue;
+      }
+    }
+    s.pending = signIn(i, fetchImpl)
+      .then((token) => {
+        nextAccount = (i + 1) % accounts.length;
+        return token;
+      })
+      .catch((err) => {
+        rejectAccount(i);
+        throw err;
+      })
+      .finally(() => {
+        s.pending = undefined;
+      });
+    try {
+      const token = await s.pending;
+      return { token, accountIndex: i };
+    } catch (err) {
+      lastError = errorOf(err);
+    }
+  }
+  throw lastError ?? new Error("Could not sign in to any MlegacyTV account");
 }
 
 /** Turns a stale catalogue video_link into the current playable address from mlegacytv.com. */
@@ -81,17 +178,36 @@ export async function resolvePlaybackUrl(url: string | null | undefined, fetchIm
   if (pending) return pending;
 
   const task = (async () => {
-    const token = await accessToken(fetchImpl);
-    const res = await fetchImpl(PLAYBACK_API, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ url: original }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    const json = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
-    if (!res.ok || !json.url) throw new Error(`MlegacyTV playback resolver failed (${res.status}): ${json.error ?? "no playable URL returned"}`);
-    playbackCache.set(original, json.url);
-    return json.url;
+    const excluded = new Set<number>();
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < Math.max(1, accounts.length); attempt++) {
+      let current: TokenResult;
+      try {
+        current = await accessToken(fetchImpl, excluded);
+      } catch (err) {
+        if (lastError) throw lastError;
+        throw err;
+      }
+      const res = await fetchImpl(PLAYBACK_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${current.token}` },
+        body: JSON.stringify({ url: original }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const json = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+      if (res.ok && json.url) {
+        playbackCache.set(original, json.url);
+        return json.url;
+      }
+      lastError = new Error(`MlegacyTV playback resolver failed (${res.status}): ${json.error ?? "no playable URL returned"}`);
+      if (res.status === 401 || res.status === 403 || /session|token|unauthor/i.test(json.error ?? "")) {
+        rejectAccount(current.accountIndex);
+        excluded.add(current.accountIndex);
+        continue;
+      }
+      throw lastError;
+    }
+    throw lastError ?? new Error("No MlegacyTV account could resolve the playback URL");
   })().finally(() => {
     playbackPending.delete(original);
   });
