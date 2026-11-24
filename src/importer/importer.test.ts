@@ -158,6 +158,25 @@ test("platform: a refused sign-in is fatal and names the likely cause on a 404",
   await assert.rejects(p.signIn(), (e: Error & { fatal?: boolean }) => e.fatal === true && /PLATFORM_API_URL/.test(e.message));
 });
 
+test("platform: refreshes the token after an expired-token 403", async () => {
+  const { config } = loadImportConfig({ PLATFORM_API_URL: "http://x.test/api/v1", PLATFORM_EMAIL: "a@b.c", PLATFORM_PASSWORD: "pw" });
+  let logins = 0;
+  let checks = 0;
+  const f = (async (url: string) => {
+    if (String(url).endsWith("/login")) {
+      logins++;
+      return new Response(JSON.stringify({ data: { accessToken: `t${logins}` } }), { status: 200 });
+    }
+    checks++;
+    if (checks === 1) return new Response(JSON.stringify({ error: "Invalid or expired token" }), { status: 403 });
+    return new Response(JSON.stringify({ data: [], duplicate: null }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const p = new Platform(config, f);
+  assert.deepEqual(await p.checkTitle("Hope"), { duplicate: false, existsAnyVj: false });
+  assert.equal(logins, 2);
+  assert.equal(checks, 2);
+});
+
 test("platform: finds a series by title and VJ and reads its seasons and episodes", async () => {
   const { platform } = fakePlatform((_m, path) => {
     if (path.startsWith("/series?")) return { body: { data: [{ id: "s0", title: "Other", vj: { id: "v1" } }, { id: "s1", title: "Your Honor", vj: { id: "v1" } }, { id: "s2", title: "Your Honor", vj: { id: "v2" } }] } };
@@ -286,6 +305,21 @@ test("an inline genre override rescues a film with no metadata genre", async () 
     assert.deepEqual(genres, ["Drama"]);
     assert.deepEqual(payload()?.genreIds, ["g:Drama"]);
     assert.match(result.items[0]?.reason ?? "", /manual genre override/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a film with no genre anywhere is imported as Thriller", async () => {
+  const dir = path.join(os.tmpdir(), `movie-champ-genre-${randomUUID()}`);
+  const { importer, genres, payload } = genreOverrideImporter(dir);
+  try {
+    const result = await importer.run({ ids: ["42"] });
+    assert.equal(result.counts.imported, 1);
+    assert.equal(result.counts.failed, 0);
+    assert.deepEqual(genres, ["Thriller"]);
+    assert.deepEqual(payload()?.genreIds, ["g:Thriller"]);
+    assert.match(result.items[0]?.reason ?? "", /Thriller/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

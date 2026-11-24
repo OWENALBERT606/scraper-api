@@ -110,12 +110,14 @@ export class Platform {
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(60_000),
     });
-    if (res.status === 401 && !retried) {
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const message = String(json.error ?? json.message ?? `HTTP ${res.status}`);
+    if (!res.ok && !retried && (res.status === 401 || (res.status === 403 && /token|session|unauthor|expired/i.test(message)))) {
       this.token = "";
+      await this.login();
       return this.request<T>(method, path, body, true);
     }
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) throw new PlatformError(res.status, String(json.error ?? json.message ?? `HTTP ${res.status}`));
+    if (!res.ok) throw new PlatformError(res.status, message);
     return json as T;
   }
 

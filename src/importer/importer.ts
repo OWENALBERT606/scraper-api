@@ -425,7 +425,10 @@ export class Importer {
         genreId = (imdb?.genreId as string | null) || "";
         if (genreId) genreSource = "OMDb";
       }
-      if (!genreId) return this.fail(item, ledger, sourceId, "No genre could be decided (no TMDB match, unknown category, no override, and nothing on OMDb/IMDb)");
+      if (!genreId) {
+        genreId = (await this.platform.ensureGenre("Thriller")).id;
+        genreSource = "default Thriller genre";
+      }
       let yearId = (meta?.yearId as string | null) || (imdb?.yearId as string | null) || "";
       if (!yearId) {
         const y = year ?? detail.year ?? (detail.timestamp ? new Date(detail.timestamp.replace(" ", "T") + "Z").getUTCFullYear() : new Date().getUTCFullYear());
@@ -572,7 +575,7 @@ export class Importer {
             const name = detail.genreName || sections.get(Number(detail.category_id));
             if (name) genreId = (await this.platform.ensureGenre(name)).id;
           }
-          if (!genreId) throw new Error("No genre could be decided for the series (no TMDB match, unknown category, and no override)");
+          if (!genreId) genreId = (await this.platform.ensureGenre("Thriller")).id;
           let yearId = (meta?.yearId as string | null) || "";
           if (!yearId) yearId = (await this.platform.ensureYear(parsed.year ?? new Date().getUTCFullYear())).id;
           const poster = String(meta?.poster || detail.image || "");
