@@ -251,6 +251,43 @@ test("a movies-only run skips series episodes", async () => {
   assert.match(result.items[0]?.reason ?? "", /movies-only/);
 });
 
+test("fill existing series queues only the episodes the platform is missing", async () => {
+  const seen: string[] = [];
+  const source: Source = {
+    name: "mlegacytv",
+    label: "Test",
+    referer: "",
+    missing: () => [],
+    discover: async () => { throw new Error("discover must not run in fill mode"); },
+    detail: async (id) => {
+      seen.push(id);
+      return { title: "Queen of the South S2 E1", vj: "Junior", playingurl: "https://x.test/ep.mp4", episode: { base: "Queen of the South", season: 2, episode: 1 } };
+    },
+    sections: async () => new Map(),
+    missingEpisodes: async (series, note) => {
+      assert.equal(series.length, 1);
+      assert.deepEqual([...(series[0]?.tree.get(1)?.episodes ?? [])], [1]);
+      note("checking existing series");
+      return ["e:99"];
+    },
+  };
+  const platform = {
+    signIn: async () => undefined,
+    listSeries: async () => [{ id: "s1", title: "Queen of the South", vjId: "v1", vjName: "Junior" }],
+    seriesTree: async () => new Map([[1, { id: "se1", episodes: new Set([1]) }]]),
+    findVj: async () => ({ id: "v1", name: "Junior" }),
+    findSeries: async () => null,
+  } as unknown as Platform;
+  const importer = new Importer(
+    { PLATFORM_API_URL: "http://x.test/api/v1", PLATFORM_EMAIL: "a@b.c", PLATFORM_PASSWORD: "pw", IMPORT_DATA_DIR: "data-test-fill" },
+    { platform, store: {} as unknown as B2Store, source }
+  );
+  const result = await importer.run({ dryRun: true, fillExisting: true, media: "series" });
+  assert.deepEqual(seen, ["e:99"]);
+  assert.equal(result.counts.ready, 1);
+  assert.match(result.items[0]?.reason ?? "", /season 2 episode 1/);
+});
+
 function genreOverrideImporter(dataDir: string, inline?: string) {
   const genres: string[] = [];
   let payload: Record<string, unknown> | null = null;

@@ -433,15 +433,16 @@ router.get("/import/status", (req: Request, res: Response) => {
   if (imp) res.json({ success: true, data: imp.status() });
 });
 
-// ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: (number|string)[], media?: all|movies|series } ──
+// ── POST /import/start  { dryRun?: boolean, limit?: number, ids?: (number|string)[], media?: all|movies|series, fillExisting?: boolean } ──
 // Starts in the background and answers at once. Use dryRun first: it only reports what would be imported or skipped.
 router.post("/import/start", (req: Request, res: Response) => {
   const imp = pickImporter(req, res);
   if (!imp) return;
-  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: (number | string)[]; retryFailed?: boolean; media?: string };
+  const body = (req.body ?? {}) as { dryRun?: boolean; limit?: number; ids?: (number | string)[]; retryFailed?: boolean; media?: string; fillExisting?: boolean };
   const r = imp.start({
     dryRun: body.dryRun === true,
     retryFailed: body.retryFailed === true,
+    fillExisting: body.fillExisting === true,
     media: body.media === "movies" || body.media === "series" ? body.media : "all",
     limit: typeof body.limit === "number" ? body.limit : undefined,
     ids: Array.isArray(body.ids) ? body.ids.filter((x) => (typeof x === "number" && Number.isFinite(x)) || (typeof x === "string" && x.trim())) : undefined,

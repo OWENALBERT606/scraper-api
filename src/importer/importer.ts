@@ -1,8 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
-import { baseKey, searchContent, seasonEpisode, seriesBase } from "../scrapers/freewatch";
-import { freewatchSource, Source, SourceDetail } from "./sources";
+import { seasonEpisode, seriesBase } from "../scrapers/freewatch";
+import { ExistingSeries, freewatchSource, Source, SourceDetail } from "./sources";
 import { B2Store } from "./b2";
 import { b2ObjectUrl, ImportConfig, loadImportConfig } from "./config";
 import {
@@ -64,6 +64,8 @@ export interface RunOptions {
   retryFailed?: boolean;
   /** restrict a run to films, series episodes, or both */
   media?: ImportMedia;
+  /** only look for episodes missing from series that already exist on the platform */
+  fillExisting?: boolean;
 }
 
 export interface ImportStatus {
@@ -239,18 +241,27 @@ export class Importer {
         ledger.failed = {};
         await this.writeLedger(ledger);
       }
-      const found = opts.ids?.length
-        ? { ids: this.source.expand ? await this.source.expand(opts.ids.map(String)) : opts.ids.map(String), groupSize: new Map<string, number>() }
-        : await this.discover();
-      if (this.source.name === "freewatch" && this.cfg.series && !opts.ids?.length && !this.stopRequested) {
-        // series already on the platform: look for episodes the source has that the platform does not
-        const missing = await this.missingEpisodes();
-        const all = new Set(found.ids);
-        for (const id of missing.map(String)) {
-          all.add(id);
-          found.groupSize.set(id, Math.max(found.groupSize.get(id) ?? 0, 2));
+      let found: { ids: string[]; groupSize: Map<string, number> };
+      if (opts.ids?.length) {
+        found = { ids: this.source.expand ? await this.source.expand(opts.ids.map(String)) : opts.ids.map(String), groupSize: new Map() };
+      } else if (opts.fillExisting) {
+        this.message = "Looking for missing episodes in existing series…";
+        const ids = await this.missingEpisodes();
+        const groupSize = new Map<string, number>();
+        if (this.source.name === "freewatch") for (const id of ids) groupSize.set(id, 2);
+        found = { ids, groupSize };
+      } else {
+        found = await this.discover();
+        if (this.source.name === "freewatch" && this.cfg.series && !this.stopRequested) {
+          // FreeWatch's search only finds a few episodes at a time, so fill existing series from it as well
+          const missing = await this.missingEpisodes();
+          const all = new Set(found.ids);
+          for (const id of missing) {
+            all.add(id);
+            found.groupSize.set(id, Math.max(found.groupSize.get(id) ?? 0, 2));
+          }
+          found.ids = [...all];
         }
-        found.ids = [...all];
       }
       if (this.source.name === "mlegacytv") {
         found.ids = this.media === "all" ? orderMlegacyIds(found.ids) : found.ids.filter((id) => mediaForId(id, this.source.name) === this.media);
@@ -286,54 +297,33 @@ export class Importer {
     return this.status();
   }
 
-  /**
-   * For every series already on the platform, searches the source for the same series under the same VJ and returns the
-   * ids of episodes the platform does not have yet. Nothing is downloaded here; the normal episode path does the copying.
-   */
-  private async missingEpisodes(): Promise<number[]> {
-    const ids: number[] = [];
+  /** Reads the platform's series trees and asks the source which episodes are missing from them. */
+  private async missingEpisodes(): Promise<string[]> {
+    const source = this.source.missingEpisodes;
+    if (!source) return [];
     let list: Awaited<ReturnType<Platform["listSeries"]>> = [];
     try {
       list = await this.platform.listSeries();
     } catch (e) {
       this.message = `Series on the platform could not be listed (${e instanceof Error ? e.message : e}); skipping the missing-episode check`;
-      return ids;
+      return [];
     }
+    const series: ExistingSeries[] = [];
     let checked = 0;
     let next = 0;
-    const worker = async () => {
-      while (!this.stopRequested) {
-        const s = list[next++];
-        if (!s) return;
-        this.message = `Checking existing series for missing episodes (${++checked} of ${list.length})…`;
-        try {
-          const key = baseKey(s.title);
-          const vjKey = normalizeTitle(cleanVj(s.vjName));
-          const tree = await this.platform.seriesTree(s.id);
-          const maxSeason = Math.max(1, ...tree.keys());
-          // the source's search shows only a few results, so ask for the series and for each of its seasons
-          const queries = [seriesBase(s.title) || s.title, ...Array.from({ length: Math.min(8, maxSeason + 1) }, (_, i) => `${seriesBase(s.title) || s.title} season ${i + 1}`)];
-          const seen = new Set<number>();
-          for (const q of queries) {
-            const res = await searchContent(q).catch(() => null);
-            for (const g of res?.series ?? []) {
-              for (const ep of g.episodes ?? []) {
-                const title = ep.title || g.title || "";
-                if (baseKey(title) !== key || normalizeTitle(cleanVj(ep.vj)) !== vjKey) continue;
-                const [sn, en] = seasonEpisode(title);
-                if (!en || seen.has(Number(ep.id))) continue;
-                seen.add(Number(ep.id));
-                if (!tree.get(sn || 1)?.episodes.has(en)) ids.push(Number(ep.id));
-              }
-            }
-          }
-        } catch {
-          /* this series is checked again on the next run */
+    await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        while (!this.stopRequested) {
+          const s = list[next++];
+          if (!s) return;
+          this.message = `Reading seasons of existing series (${++checked} of ${list.length})…`;
+          const tree = await this.platform.seriesTree(s.id).catch(() => new Map());
+          series.push({ id: s.id, title: s.title, vjName: s.vjName, tree });
         }
-      }
-    };
-    await Promise.all(Array.from({ length: 4 }, worker));
-    return ids;
+      })
+    );
+    if (this.stopRequested) return [];
+    return source(series, (m) => (this.message = m));
   }
 
   private sectionGenres(): Promise<Map<number, string>> {

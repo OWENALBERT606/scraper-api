@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import type * as MLTV from "./mlegacytv";
+import type { ExistingSeries } from "../importer/sources";
 
 process.env.MLEGACYTV_SUPABASE_URL = "https://supabase.test";
 process.env.MLEGACYTV_SUPABASE_KEY = "anon";
@@ -29,4 +31,32 @@ test("a subscription refusal is reported without draining the account pool", asy
   await assert.rejects(resolvePlaybackUrl("https://stale.example/film.mp4", fetchImpl), /active subscription/);
   await assert.rejects(resolvePlaybackUrl("https://stale.example/other.mp4", fetchImpl), /active subscription/);
   assert.equal(signIns, 1);
+});
+
+test("MlegacyTV fill-existing only queues episodes absent from the platform", async (t) => {
+  const mltv = await import("./mlegacytv");
+  const { mlegacySource } = await import("../importer/sources");
+  const series = { id: "s1", title: "Queen of the South", vj_name: "Junior" } as MLTV.MLTVSeries;
+  t.mock.method(mltv, "fetchCatalog", async () => ({ total: 1, movies_total: 0, series_total: 1, movies: [], series: [series] }));
+  t.mock.method(mltv, "fetchSeries", async () => ({
+    ...series,
+    genre: [],
+    seasons: [{
+      id: 1,
+      title: "Season 1",
+      order: 1,
+      episode_count: 2,
+      published: true,
+      episodes: [
+        { id: 42550, title: "Piloto", playingurl: "https://x.test/1.mp4", season_id: 1, order: 1, published: true },
+        { id: 42551, title: "Cuarenta Minutos", playingurl: "https://x.test/2.mp4", season_id: 1, order: 2, published: true },
+      ],
+    }],
+    total_episodes: 2,
+  } as unknown as MLTV.MLTVSeriesDetail));
+
+  const existing: ExistingSeries[] = [
+    { id: "p1", title: "Queen of the South", vjName: "JUNIOR", tree: new Map([[1, { id: "se1", episodes: new Set([1]) }]]) },
+  ];
+  assert.deepEqual(await mlegacySource().missingEpisodes!(existing, () => {}), ["e:42551"]);
 });
