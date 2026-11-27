@@ -9,11 +9,13 @@ process.env.MLEGACYTV_EMAIL = "user@example.com";
 process.env.MLEGACYTV_PASSWORD = "secret";
 
 test("only real authentication failures make a playback account rotate", async () => {
-  const { isPlaybackAuthFailure } = await import("./mlegacytv");
+  const { isPlaybackAuthFailure, isPlaybackSubscriptionFailure } = await import("./mlegacytv");
   assert.equal(isPlaybackAuthFailure(401, "invalid JWT"), true);
   assert.equal(isPlaybackAuthFailure(403, "session expired"), true);
   assert.equal(isPlaybackAuthFailure(403, "An active subscription is required to watch or download."), false);
   assert.equal(isPlaybackAuthFailure(500, "token"), false);
+  assert.equal(isPlaybackSubscriptionFailure(403, "An active subscription is required to watch or download."), true);
+  assert.equal(isPlaybackSubscriptionFailure(401, "An active subscription is required to watch or download."), false);
 });
 
 test("a subscription refusal is reported without draining the account pool", async () => {

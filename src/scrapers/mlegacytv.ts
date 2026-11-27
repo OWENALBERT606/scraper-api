@@ -91,6 +91,10 @@ export function isPlaybackAuthFailure(status: number, message: string): boolean 
   return status === 401 || (status === 403 && /session|token|unauthor|sign.?in/i.test(message));
 }
 
+export function isPlaybackSubscriptionFailure(status: number, message: string): boolean {
+  return status === 403 && /subscription/i.test(message);
+}
+
 function usableAccounts(exclude: Set<number>): number[] {
   const now = Date.now();
   const order: number[] = [];
@@ -187,6 +191,7 @@ export async function resolvePlaybackUrl(url: string | null | undefined, fetchIm
   const task = (async () => {
     const excluded = new Set<number>();
     let lastError: Error | null = null;
+    let subscriptionFailures = 0;
     for (let attempt = 0; attempt < Math.max(1, accounts.length); attempt++) {
       let current: TokenResult;
       try {
@@ -213,7 +218,16 @@ export async function resolvePlaybackUrl(url: string | null | undefined, fetchIm
         excluded.add(current.accountIndex);
         continue;
       }
+      if (isPlaybackSubscriptionFailure(res.status, message)) {
+        subscriptionFailures++;
+        excluded.add(current.accountIndex);
+        continue;
+      }
       throw lastError;
+    }
+    if (subscriptionFailures && lastError) {
+      const noun = accounts.length === 1 ? "account" : "accounts";
+      throw new Error(`${lastError.message} (tried ${excluded.size} of ${accounts.length} configured ${noun}; each MlegacyTV account needs an active subscription)`);
     }
     throw lastError ?? new Error("No MlegacyTV account could resolve the playback URL");
   })().finally(() => {
