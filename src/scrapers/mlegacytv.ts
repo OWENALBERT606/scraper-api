@@ -59,6 +59,7 @@ function readAccounts(): Account[] {
 const accounts = readAccounts();
 const sessions: Session[] = accounts.map(() => ({ token: "", expiresAt: 0, rejectedUntil: 0 }));
 let nextAccount = 0;
+let lastRejection = "";
 const playbackCache = new Map<string, string>();
 const playbackPending = new Map<string, Promise<string>>();
 
@@ -78,11 +79,16 @@ function errorOf(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-function rejectAccount(index: number): void {
+function rejectAccount(index: number, reason: string): void {
   const s = sessions[index];
   s.token = "";
   s.expiresAt = 0;
   s.rejectedUntil = Date.now() + ACCOUNT_COOLDOWN_MS;
+  lastRejection = reason;
+}
+
+export function isPlaybackAuthFailure(status: number, message: string): boolean {
+  return status === 401 || (status === 403 && /session|token|unauthor|sign.?in/i.test(message));
 }
 
 function usableAccounts(exclude: Set<number>): number[] {
@@ -122,7 +128,8 @@ async function accessToken(fetchImpl: typeof fetch = fetch, exclude: Set<number>
   if (!order.length) {
     const missing = playbackCredentialsMissing();
     if (missing.length) throw new Error(`${missing.join(" / ")} are not set — cannot resolve MlegacyTV video links`);
-    throw new Error("All MlegacyTV accounts are temporarily unavailable — check MLEGACYTV_EMAIL* / MLEGACYTV_PASSWORD*");
+    const reason = lastRejection ? ` (last failure: ${lastRejection})` : "";
+    throw new Error(`All MlegacyTV accounts are temporarily unavailable — check MLEGACYTV_EMAIL* / MLEGACYTV_PASSWORD*${reason}`);
   }
 
   for (const i of order) {
@@ -152,7 +159,7 @@ async function accessToken(fetchImpl: typeof fetch = fetch, exclude: Set<number>
         return token;
       })
       .catch((err) => {
-        rejectAccount(i);
+        rejectAccount(i, errorOf(err).message);
         throw err;
       })
       .finally(() => {
@@ -199,9 +206,10 @@ export async function resolvePlaybackUrl(url: string | null | undefined, fetchIm
         playbackCache.set(original, json.url);
         return json.url;
       }
-      lastError = new Error(`MlegacyTV playback resolver failed (${res.status}): ${json.error ?? "no playable URL returned"}`);
-      if (res.status === 401 || res.status === 403 || /session|token|unauthor/i.test(json.error ?? "")) {
-        rejectAccount(current.accountIndex);
+      const message = json.error ?? "";
+      lastError = new Error(`MlegacyTV playback resolver failed (${res.status}): ${message || "no playable URL returned"}`);
+      if (isPlaybackAuthFailure(res.status, message)) {
+        rejectAccount(current.accountIndex, lastError.message);
         excluded.add(current.accountIndex);
         continue;
       }
